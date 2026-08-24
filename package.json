@@ -1,0 +1,72 @@
+{
+  "name": "pi-multiprovider",
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.20.0",
+  "description": "Same-provider multi-account pooling, OAuth storage, and safe in-stream auth failover for Pi",
+  "homepage": "https://github.com/monotykamary/pi-multiprovider#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/monotykamary/pi-multiprovider.git"
+  },
+  "bugs": {
+    "url": "https://github.com/monotykamary/pi-multiprovider/issues"
+  },
+  "author": "monotykamary",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./extension": "./extensions/multiprovider.ts",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "extensions",
+    "lib",
+    "src",
+    "media",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "pnpm run typecheck && tsdown",
+    "prepack": "pnpm run build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json",
+    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "multi-account",
+    "credential-pooling",
+    "round-robin",
+    "oauth",
+    "failover"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/multiprovider.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.84.3",
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "@types/node": "^22.20.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.8"
+  }
+}
