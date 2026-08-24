@@ -7,7 +7,7 @@
 _One provider ID. One model ID. As many API-key or OAuth accounts as you need._
 
 <p>
-  <img src="https://raw.githubusercontent.com/monotykamary/pi-multiprovider/main/media/cover.svg" alt="Multiple credential accounts converging through the pi-multiprovider scheduler without changing provider identity" width="1100">
+  <img src="https://raw.githubusercontent.com/monotykamary/pi-multiprovider/main/media/cover.svg" alt="Animated abstract artwork: violet, indigo, cyan, and teal credential streams converge into a glowing scheduler nexus and leave as one luminous current — one stream briefly flares and cools down while the rest carry the load" width="1100">
 </p>
 
 [![npm version](https://img.shields.io/npm/v/pi-multiprovider?style=for-the-badge&logo=npm&color=cb3837)](https://www.npmjs.com/package/pi-multiprovider)

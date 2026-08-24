@@ -1,65 +1,253 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
-  <title id="title">pi-multiprovider account transit</title>
-  <desc id="desc">Multiple credential accounts converge into one provider and model identity.</desc>
+  <title id="title">pi-multiprovider — convergence</title>
+  <desc id="desc">Abstract animation: five coloured credential streams flow in from the left, merge inside a glowing scheduler nexus, and leave as one luminous current on the right. One stream periodically cools down and recovers while the rest carry the load.</desc>
   <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#090d1b"/>
-      <stop offset="0.5" stop-color="#171335"/>
-      <stop offset="1" stop-color="#071d28"/>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#060913"/>
+      <stop offset="0.5" stop-color="#0d0b26"/>
+      <stop offset="1" stop-color="#062027"/>
     </linearGradient>
-    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#a78bfa"/>
-      <stop offset="1" stop-color="#22d3ee"/>
-    </linearGradient>
-    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="8" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    <radialGradient id="aurV"><stop offset="0" stop-color="#7c3aed" stop-opacity="0.32"/><stop offset="1" stop-color="#7c3aed" stop-opacity="0"/></radialGradient>
+    <radialGradient id="aurC"><stop offset="0" stop-color="#22d3ee" stop-opacity="0.26"/><stop offset="1" stop-color="#22d3ee" stop-opacity="0"/></radialGradient>
+    <radialGradient id="aurI"><stop offset="0" stop-color="#6366f1" stop-opacity="0.28"/><stop offset="1" stop-color="#6366f1" stop-opacity="0"/></radialGradient>
+    <linearGradient id="gA" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7c3aed"/><stop offset="0.6" stop-color="#a78bfa"/><stop offset="1" stop-color="#e9d5ff"/></linearGradient>
+    <linearGradient id="gB" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#4f46e5"/><stop offset="0.6" stop-color="#818cf8"/><stop offset="1" stop-color="#c7d2fe"/></linearGradient>
+    <linearGradient id="gC" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#0e7490"/><stop offset="0.6" stop-color="#22d3ee"/><stop offset="1" stop-color="#a5f3fc"/></linearGradient>
+    <linearGradient id="gD" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#0f766e"/><stop offset="0.6" stop-color="#2dd4bf"/><stop offset="1" stop-color="#99f6e4"/></linearGradient>
+    <linearGradient id="gE" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#2563eb"/><stop offset="0.6" stop-color="#60a5fa"/><stop offset="1" stop-color="#bfdbfe"/></linearGradient>
+    <linearGradient id="gOut" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#a5f3fc"/><stop offset="0.35" stop-color="#67e8f9"/><stop offset="1" stop-color="#f0fdff"/></linearGradient>
+    <radialGradient id="core"><stop offset="0" stop-color="#ffffff"/><stop offset="0.45" stop-color="#e9e3ff"/><stop offset="0.75" stop-color="#a78bfa"/><stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/></radialGradient>
+    <radialGradient id="halo"><stop offset="0" stop-color="#c4b5fd" stop-opacity="0.45"/><stop offset="1" stop-color="#c4b5fd" stop-opacity="0"/></radialGradient>
+    <radialGradient id="dotViolet"><stop offset="0" stop-color="#ffffff"/><stop offset="0.4" stop-color="#c4b5fd"/><stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/></radialGradient>
+    <radialGradient id="dotIndigo"><stop offset="0" stop-color="#ffffff"/><stop offset="0.4" stop-color="#a5b4fc"/><stop offset="1" stop-color="#6366f1" stop-opacity="0"/></radialGradient>
+    <radialGradient id="dotCyan"><stop offset="0" stop-color="#ffffff"/><stop offset="0.4" stop-color="#67e8f9"/><stop offset="1" stop-color="#0891b2" stop-opacity="0"/></radialGradient>
+    <radialGradient id="dotTeal"><stop offset="0" stop-color="#ffffff"/><stop offset="0.4" stop-color="#5eead4"/><stop offset="1" stop-color="#14b8a6" stop-opacity="0"/></radialGradient>
+    <radialGradient id="dotBlue"><stop offset="0" stop-color="#ffffff"/><stop offset="0.4" stop-color="#93c5fd"/><stop offset="1" stop-color="#3b82f6" stop-opacity="0"/></radialGradient>
+    <radialGradient id="dotWhite"><stop offset="0" stop-color="#ffffff"/><stop offset="0.45" stop-color="#cffafe"/><stop offset="1" stop-color="#22d3ee" stop-opacity="0"/></radialGradient>
+    <radialGradient id="vig" cx="0.5" cy="0.5" r="0.72"><stop offset="0" stop-color="#02040a" stop-opacity="0"/><stop offset="0.62" stop-color="#02040a" stop-opacity="0"/><stop offset="1" stop-color="#02040a" stop-opacity="0.55"/></radialGradient>
+    <filter id="warp" x="-30%" y="-30%" width="160%" height="160%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.018 0.02" numOctaves="2" seed="11" result="n"/>
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="9" xChannelSelector="R" yChannelSelector="G"/>
     </filter>
+    <filter id="ink" x="-30%" y="-30%" width="160%" height="160%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.012" numOctaves="3" seed="11" result="n"/>
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="110" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" seed="3" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.05 0"/>
+    </filter>
+    <mask id="reveal" x="0" y="0" width="1200" height="520" maskUnits="userSpaceOnUse">
+      <rect width="1200" height="520" fill="black"/>
+      <circle cx="600" cy="260" r="0" fill="white" filter="url(#ink)">
+        <animate attributeName="r" values="0;0;900" keyTimes="0;0.08;1" dur="3.2s" fill="freeze" calcMode="spline" keySplines="0 0 1 1;0.22 0.61 0.36 1"/>
+      </circle>
+    </mask>
+    <path id="pA" d="M -10 92 C 250 68, 430 168, 640 250" fill="none"/>
+    <path id="pB" d="M -10 196 C 300 184, 450 224, 640 256" fill="none"/>
+    <path id="pC" d="M -10 300 C 300 302, 460 284, 640 260" fill="none"/>
+    <path id="pD" d="M -10 402 C 280 428, 440 336, 640 264" fill="none"/>
+    <path id="pE" d="M -10 496 C 230 512, 420 372, 640 268" fill="none"/>
+    <path id="pOut" d="M 640 260 C 830 260, 980 244, 1215 244" fill="none"/>
   </defs>
-  <rect width="1200" height="520" rx="28" fill="url(#background)"/>
-  <circle cx="1030" cy="80" r="170" fill="#22d3ee" opacity="0.06"/>
-  <circle cx="180" cy="470" r="240" fill="#8b5cf6" opacity="0.08"/>
-  <text x="600" y="76" text-anchor="middle" fill="#f8fafc" font-family="ui-sans-serif, system-ui" font-size="40" font-weight="700">One provider. Every account.</text>
-  <text x="600" y="111" text-anchor="middle" fill="#a5b4fc" font-family="ui-monospace, monospace" font-size="17">auth swaps in transit · identity stays put</text>
-  <g font-family="ui-sans-serif, system-ui">
-    <path d="M300 190 C450 190 440 260 570 260" fill="none" stroke="url(#line)" stroke-width="5" opacity="0.8"/>
-    <path d="M300 260 C450 260 450 260 570 260" fill="none" stroke="url(#line)" stroke-width="5" opacity="0.9"/>
-    <path d="M300 330 C450 330 440 260 570 260" fill="none" stroke="url(#line)" stroke-width="5" opacity="0.8"/>
-    <path d="M760 260 H900" fill="none" stroke="#22d3ee" stroke-width="6" filter="url(#glow)"/>
+  <rect width="1200" height="520" fill="#050810"/>
+  <g mask="url(#reveal)">
+    <rect width="1200" height="520" fill="url(#bg)"/>
+    <circle cx="240" cy="425" r="330" fill="url(#aurV)">
+      <animate attributeName="cx" values="240;285;240" dur="26s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="1005" cy="95" r="290" fill="url(#aurC)">
+      <animate attributeName="cy" values="95;140;95" dur="32s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="520" cy="130" r="270" fill="url(#aurI)">
+      <animate attributeName="cx" values="520;565;520" dur="38s" repeatCount="indefinite"/>
+    </circle>
     <g>
-      <rect x="90" y="158" width="210" height="64" rx="16" fill="#1e1b4b" stroke="#8b5cf6" stroke-width="2"/>
-      <circle cx="125" cy="190" r="12" fill="#a78bfa"/>
-      <text x="150" y="197" fill="#ede9fe" font-size="20" font-weight="600">Work account</text>
+      <circle cx="414" cy="329" r="0.8" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="5.3s" begin="-4.5s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="906" cy="155" r="1.2" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="4.0s" begin="-5.2s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="830" cy="423" r="1.5" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="5.1s" begin="-7.5s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="518" cy="452" r="0.9" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="8.2s" begin="-2.6s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="50" cy="255" r="0.8" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="4.8s" begin="-8.4s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="305" cy="180" r="1.3" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="7.7s" begin="-5.3s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="950" cy="310" r="1.3" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="4.4s" begin="-2.4s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="121" cy="444" r="1.6" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="5.2s" begin="-7.3s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="283" cy="224" r="0.9" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="4.1s" begin="-1.3s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="435" cy="280" r="1.6" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="6.1s" begin="-3.4s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="435" cy="320" r="1.1" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="4.1s" begin="-6.8s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="523" cy="412" r="0.9" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="7.4s" begin="-4.8s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="901" cy="319" r="1.2" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="6.1s" begin="-2.1s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="43" cy="181" r="1.2" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="5.4s" begin="-8.9s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="969" cy="304" r="0.9" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="8.8s" begin="-5.3s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="709" cy="87" r="0.9" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="8.2s" begin="-6.0s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="560" cy="389" r="1.3" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="8.3s" begin="-3.0s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="176" cy="240" r="0.9" fill="#dbeafe" opacity="0.2">
+        <animate attributeName="opacity" values="0.06;0.55;0.06" dur="8.5s" begin="-3.1s" repeatCount="indefinite"/>
+      </circle>
     </g>
     <g>
-      <rect x="90" y="228" width="210" height="64" rx="16" fill="#172554" stroke="#6366f1" stroke-width="2"/>
-      <circle cx="125" cy="260" r="12" fill="#818cf8"/>
-      <text x="150" y="267" fill="#e0e7ff" font-size="20" font-weight="600">Personal account</text>
+      <use href="#pA" stroke="url(#gA)" stroke-width="6" opacity="0.08"/>
+      <use href="#pA" stroke="url(#gA)" stroke-width="1.6" opacity="0.3"/>
+      <use href="#pA" stroke="url(#gA)" stroke-width="2.8" stroke-linecap="round" stroke-dasharray="12 26" opacity="0.95">
+        <animate attributeName="stroke-dashoffset" from="0" to="-38" dur="2.7s" repeatCount="indefinite"/>
+      </use>
+      <circle r="3.1" fill="url(#dotViolet)">
+        <animateMotion dur="5.5s" begin="-3.20s" repeatCount="indefinite"><mpath href="#pA"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="5.5s" begin="-3.20s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="3.4" fill="url(#dotViolet)">
+        <animateMotion dur="7.2s" begin="-6.59s" repeatCount="indefinite"><mpath href="#pA"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="7.2s" begin="-6.59s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="3.4" fill="url(#dotViolet)">
+        <animateMotion dur="6.3s" begin="-4.74s" repeatCount="indefinite"><mpath href="#pA"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="6.3s" begin="-4.74s" repeatCount="indefinite"/>
+      </circle>
     </g>
     <g>
-      <rect x="90" y="298" width="210" height="64" rx="16" fill="#083344" stroke="#0891b2" stroke-width="2"/>
-      <circle cx="125" cy="330" r="12" fill="#22d3ee"/>
-      <text x="150" y="337" fill="#cffafe" font-size="20" font-weight="600">OAuth account</text>
-    </g>
-    <g filter="url(#glow)">
-      <rect x="570" y="202" width="190" height="116" rx="24" fill="#18181b" stroke="url(#line)" stroke-width="3"/>
-      <text x="665" y="246" text-anchor="middle" fill="#f8fafc" font-size="22" font-weight="700">scheduler</text>
-      <text x="665" y="277" text-anchor="middle" fill="#c4b5fd" font-size="15">lease · health · retry</text>
-      <text x="665" y="300" text-anchor="middle" fill="#67e8f9" font-size="15">same-ID lift</text>
+      <use href="#pB" stroke="url(#gB)" stroke-width="6" opacity="0.08"/>
+      <use href="#pB" stroke="url(#gB)" stroke-width="1.6" opacity="0.3"/>
+      <use href="#pB" stroke="url(#gB)" stroke-width="2.8" stroke-linecap="round" stroke-dasharray="12 26" opacity="0.95">
+        <animate attributeName="stroke-dashoffset" from="0" to="-38" dur="3.2s" repeatCount="indefinite"/>
+      </use>
+      <circle r="2.6" fill="url(#dotIndigo)">
+        <animateMotion dur="6.1s" begin="-3.18s" repeatCount="indefinite"><mpath href="#pB"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="6.1s" begin="-3.18s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="2.7" fill="url(#dotIndigo)">
+        <animateMotion dur="7.8s" begin="-0.38s" repeatCount="indefinite"><mpath href="#pB"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="7.8s" begin="-0.38s" repeatCount="indefinite"/>
+      </circle>
     </g>
     <g>
-      <rect x="900" y="202" width="220" height="116" rx="24" fill="#06202a" stroke="#22d3ee" stroke-width="3"/>
-      <text x="1010" y="247" text-anchor="middle" fill="#ecfeff" font-size="25" font-weight="700">provider/model</text>
-      <text x="1010" y="278" text-anchor="middle" fill="#67e8f9" font-size="18">identity unchanged</text>
-      <text x="1010" y="301" text-anchor="middle" fill="#94a3b8" font-size="14">stream continues safely</text>
+      <use href="#pC" stroke="url(#gC)" stroke-width="6" opacity="0.08"/>
+      <use href="#pC" stroke="url(#gC)" stroke-width="1.6" opacity="0.3"/>
+      <use href="#pC" stroke="url(#gC)" stroke-width="2.8" stroke-linecap="round" stroke-dasharray="12 26" opacity="0.95">
+        <animate attributeName="stroke-dashoffset" from="0" to="-38" dur="2.9s" repeatCount="indefinite"/>
+      </use>
+      <circle r="3.8" fill="url(#dotCyan)">
+        <animateMotion dur="5.2s" begin="-1.49s" repeatCount="indefinite"><mpath href="#pC"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="5.2s" begin="-1.49s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="3.3" fill="url(#dotCyan)">
+        <animateMotion dur="6.9s" begin="-4.90s" repeatCount="indefinite"><mpath href="#pC"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="6.9s" begin="-4.90s" repeatCount="indefinite"/>
+      </circle>
     </g>
-  </g>
-  <g font-family="ui-monospace, monospace" font-size="15">
-    <rect x="365" y="405" width="470" height="54" rx="14" fill="#020617" stroke="#334155"/>
-    <text x="395" y="438" fill="#a78bfa">429 account A</text>
-    <text x="540" y="438" fill="#64748b">→</text>
-    <text x="575" y="438" fill="#22d3ee">account B</text>
-    <text x="695" y="438" fill="#64748b">→</text>
-    <text x="730" y="438" fill="#86efac">done</text>
+    <g>
+      <use href="#pD" stroke="url(#gD)" stroke-width="6" opacity="0.08"/>
+      <use href="#pD" stroke="url(#gD)" stroke-width="1.6" opacity="0.3"/>
+      <use href="#pD" stroke="url(#gD)" stroke-width="2.8" stroke-linecap="round" stroke-dasharray="12 26" opacity="0.95">
+        <animate attributeName="stroke-dashoffset" from="0" to="-38" dur="3.4s" repeatCount="indefinite"/>
+      </use>
+      <circle r="2.8" fill="url(#dotTeal)">
+        <animateMotion dur="6.6s" begin="-2.39s" repeatCount="indefinite"><mpath href="#pD"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="6.6s" begin="-2.39s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="3.7" fill="url(#dotTeal)">
+        <animateMotion dur="8.1s" begin="-0.85s" repeatCount="indefinite"><mpath href="#pD"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="8.1s" begin="-0.85s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+    <g>
+      <use href="#pE" stroke="url(#gE)" stroke-width="6" opacity="0.08"/>
+      <use href="#pE" stroke="url(#gE)" stroke-width="1.6" opacity="0.3"/>
+      <use href="#pE" stroke="#93c5fd" stroke-width="2.8" stroke-linecap="round" stroke-dasharray="12 26" opacity="0.95">
+        <animate attributeName="stroke-dashoffset" from="0" to="-38" dur="3s" repeatCount="indefinite"/>
+        <animate attributeName="stroke" values="#93c5fd;#93c5fd;#fb7185;#fb7185;#93c5fd;#93c5fd" keyTimes="0;0.48;0.56;0.68;0.76;1" dur="9s" repeatCount="indefinite"/>
+        <animate attributeName="opacity" values="0.95;0.95;0.95;0.12;0.95;0.95" keyTimes="0;0.48;0.62;0.68;0.78;1" dur="9s" repeatCount="indefinite"/>
+      </use>
+      <circle r="3.6" fill="url(#dotBlue)">
+        <animateMotion dur="5.9s" begin="-5.01s" repeatCount="indefinite"><mpath href="#pE"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="5.9s" begin="-5.01s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="2.8" fill="url(#dotBlue)">
+        <animateMotion dur="7.4s" begin="-3.34s" repeatCount="indefinite"><mpath href="#pE"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.08;0.88;1" dur="7.4s" begin="-3.34s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+    <g>
+      <use href="#pOut" stroke="#22d3ee" stroke-width="22" opacity="0.11"/>
+      <use href="#pOut" stroke="#67e8f9" stroke-width="10" opacity="0.15"/>
+      <use href="#pOut" stroke="url(#gOut)" stroke-width="3.8" opacity="0.95"/>
+      <use href="#pOut" stroke="#f0fdff" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="14 30" opacity="0.9">
+        <animate attributeName="stroke-dashoffset" from="0" to="-44" dur="2.2s" repeatCount="indefinite"/>
+      </use>
+      <circle r="2.7" fill="url(#dotWhite)">
+        <animateMotion dur="3.4s" begin="-2.86s" repeatCount="indefinite"><mpath href="#pOut"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.85;1" dur="3.4s" begin="-2.86s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="3.8" fill="url(#dotWhite)">
+        <animateMotion dur="4.1s" begin="-3.14s" repeatCount="indefinite"><mpath href="#pOut"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.85;1" dur="4.1s" begin="-3.14s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="2.7" fill="url(#dotWhite)">
+        <animateMotion dur="4.8s" begin="-3.86s" repeatCount="indefinite"><mpath href="#pOut"/></animateMotion>
+        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.85;1" dur="4.8s" begin="-3.86s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+
+    <g>
+      <circle cx="640" cy="260" r="75" fill="url(#halo)" opacity="0.6">
+        <animate attributeName="opacity" values="0.5;0.85;0.5" dur="4.5s" repeatCount="indefinite"/>
+      </circle>
+      <g filter="url(#warp)">
+        <circle cx="640" cy="260" r="42" fill="none" stroke="#c4b5fd" stroke-width="1.8" stroke-dasharray="2 6" opacity="0.9">
+          <animateTransform attributeName="transform" type="rotate" from="0 640 260" to="360 640 260" dur="18s" repeatCount="indefinite"/>
+        </circle>
+        <circle cx="640" cy="260" r="62" fill="none" stroke="#67e8f9" stroke-width="1.4" stroke-dasharray="120 269.6" opacity="0.95">
+          <animateTransform attributeName="transform" type="rotate" from="360 640 260" to="0 640 260" dur="30s" repeatCount="indefinite"/>
+        </circle>
+        <circle cx="640" cy="260" r="84" fill="none" stroke="#818cf8" stroke-width="1.2" stroke-dasharray="1 9" opacity="0.45">
+          <animateTransform attributeName="transform" type="rotate" from="0 640 260" to="360 640 260" dur="44s" repeatCount="indefinite"/>
+        </circle>
+      </g>
+      <g>
+        <animateTransform attributeName="transform" type="rotate" from="0 640 260" to="360 640 260" dur="26s" repeatCount="indefinite"/>
+        <circle cx="724" cy="260" r="5" fill="url(#dotCyan)"/>
+      </g>
+      <circle cx="640" cy="260" r="20" fill="url(#core)">
+        <animate attributeName="r" values="18.5;22.5;18.5" dur="4.5s" repeatCount="indefinite"/>
+      </circle>
+      <circle cx="640" cy="260" r="7" fill="#ffffff" opacity="0.9">
+        <animate attributeName="opacity" values="0.7;1;0.7" dur="4.5s" repeatCount="indefinite"/>
+      </circle>
+    </g>
+    <text x="600" y="492" text-anchor="middle" fill="#8fa3d9" opacity="0.7" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" letter-spacing="6">many credentials · one identity</text>
+    <rect width="1200" height="520" fill="url(#vig)"/>
+    <rect width="1200" height="520" filter="url(#grain)"/>
   </g>
 </svg>
