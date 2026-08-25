@@ -40,27 +40,40 @@ function errorFrom(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value))
 }
 
-function loginOptions(providers: readonly Provider<Api>[], pooledCounts: ReadonlyMap<string, number>): SelectorOption[] {
+interface SessionRuntime {
+  getProviders(): readonly Provider<Api>[]
+  getProviderAuthStatus(id: string): { configured: boolean; label?: string; source?: string }
+  isUsingOAuth(id: string): boolean
+}
+
+function sessionRuntime(ctx: ExtensionContext): SessionRuntime | undefined {
+  const candidate = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime
+  if (typeof candidate !== 'object' || candidate === null) return undefined
+  const runtime = candidate as Record<keyof SessionRuntime, unknown>
+  if (typeof runtime.getProviders !== 'function') return undefined
+  if (typeof runtime.getProviderAuthStatus !== 'function') return undefined
+  if (typeof runtime.isUsingOAuth !== 'function') return undefined
+  return candidate as unknown as SessionRuntime
+}
+
+function loginOptions(
+  providers: readonly Provider<Api>[],
+  statusFor: (providerId: string) => { type: AuthType; source?: string } | undefined,
+): SelectorOption[] {
   const options: SelectorOption[] = []
   for (const provider of providers) {
-    const count = pooledCounts.get(provider.id) ?? 0
-    const source = count === 0 ? undefined : `${count} pooled account${count === 1 ? '' : 's'}`
-    if (provider.auth.oauth !== undefined) {
+    const status = statusFor(provider.id)
+    for (const [authType, method] of [
+      ['oauth', provider.auth.oauth],
+      ['api_key', provider.auth.apiKey],
+    ] as const) {
+      if (method === undefined) continue
       options.push({
         id: provider.id,
         name: provider.name,
-        authType: 'oauth',
-        method: provider.auth.oauth,
-        ...(source === undefined ? {} : { status: { type: 'oauth', source } }),
-      })
-    }
-    if (provider.auth.apiKey !== undefined) {
-      options.push({
-        id: provider.id,
-        name: provider.name,
-        authType: 'api_key',
-        method: provider.auth.apiKey,
-        ...(source === undefined ? {} : { status: { type: 'api_key', source } }),
+        authType,
+        method,
+        ...(status === undefined ? {} : { status }),
       })
     }
   }
@@ -70,14 +83,25 @@ function loginOptions(providers: readonly Provider<Api>[], pooledCounts: Readonl
 export async function selectLogin(
   ctx: ExtensionContext,
   providers: readonly Provider<Api>[],
-  pooledCounts: ReadonlyMap<string, number>,
   providerRef?: string,
 ): Promise<LoginSelection | undefined> {
   const normalized = providerRef?.trim().toLowerCase()
+  const runtime = sessionRuntime(ctx)
+  const all = runtime === undefined ? providers : runtime.getProviders()
   const scoped = normalized === undefined || normalized === ''
-    ? providers
-    : providers.filter(provider => provider.id.toLowerCase() === normalized || provider.name.toLowerCase() === normalized)
-  const options = loginOptions(scoped, pooledCounts)
+    ? all
+    : all.filter(provider => provider.id.toLowerCase() === normalized || provider.name.toLowerCase() === normalized)
+  const statusFor = (providerId: string): { type: AuthType; source?: string } | undefined => {
+    if (runtime === undefined) return undefined
+    const status = runtime.getProviderAuthStatus(providerId)
+    if (status === undefined || !status.configured) return undefined
+    const source = status.label ?? status.source
+    return {
+      type: runtime.isUsingOAuth(providerId) ? 'oauth' : 'api_key',
+      ...(source === undefined ? {} : { source }),
+    }
+  }
+  const options = loginOptions(scoped, statusFor)
   if (options.length === 0) {
     ctx.ui.notify(
       normalized === undefined
@@ -121,7 +145,7 @@ export async function selectLogin(
     },
   )
   if (selected === undefined) return undefined
-  const provider = providers.find(candidate => candidate.id === selected.providerId)
+  const provider = all.find(candidate => candidate.id === selected.providerId)
   return provider === undefined ? undefined : { provider, authType: selected.authType }
 }
 

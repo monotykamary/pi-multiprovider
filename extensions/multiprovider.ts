@@ -230,11 +230,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
       }
       await reconcile(ctx)
       const providers = uniqueProviders(ctx, baseProviders)
-      const pools = await Promise.all(providers.map(provider => store.getPool(provider.id)))
-      const counts = new Map(
-        pools.filter(pool => pool !== undefined).map(pool => [pool.providerId, pool.accounts.length]),
-      )
-      const selection = await selectLogin(ctx, providers, counts, args.trim() || undefined)
+      const selection = await selectLogin(ctx, providers, args.trim() || undefined)
       if (selection === undefined) return
       const provider = selection.provider
 
