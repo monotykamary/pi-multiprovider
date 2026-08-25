@@ -51,10 +51,10 @@ export interface PoolManagerCallbacks {
 
 export interface PoolManagerAuthMethod {
   label: string
-  value: AuthType
+  value: string
 }
 
-export type PoolManagerResult = { type: 'closed' } | { type: 'add'; authType: AuthType }
+export type PoolManagerResult = { type: 'closed' } | { type: 'add'; method: string }
 
 const POLICIES: readonly SelectionPolicy[] = [
   'round-robin',
@@ -388,7 +388,7 @@ export async function openPoolManager(
 
     async function dispatch(id: string, value: string): Promise<void> {
       if (id === 'pool.add-account' && value.startsWith(ADD_SENTINEL_PREFIX)) {
-        exit({ type: 'add', authType: value.slice(ADD_SENTINEL_PREFIX.length) as AuthType })
+        exit({ type: 'add', method: value.slice(ADD_SENTINEL_PREFIX.length) })
         return
       }
       if (id === 'pool.policy') {

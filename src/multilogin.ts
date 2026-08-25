@@ -54,7 +54,7 @@ function loginOptions(providers: readonly Provider<Api>[], pooledCounts: Readonl
         ...(source === undefined ? {} : { status: { type: 'oauth', source } }),
       })
     }
-    if (provider.auth.apiKey?.login !== undefined) {
+    if (provider.auth.apiKey !== undefined) {
       options.push({
         id: provider.id,
         name: provider.name,
@@ -81,8 +81,8 @@ export async function selectLogin(
   if (options.length === 0) {
     ctx.ui.notify(
       normalized === undefined
-        ? 'No providers with interactive authentication are available.'
-        : `No interactive authentication method is available for "${providerRef}".`,
+        ? 'No providers with API-key or OAuth authentication are available.'
+        : `No API-key or OAuth authentication method is available for "${providerRef}".`,
       'warning',
     )
     return undefined
@@ -189,6 +189,21 @@ export async function loginCredential(
     throw new Error(`No ${selection.authType} login method for ${selection.provider.name}`)
   }
   return method.login(interaction)
+}
+
+export async function promptApiKeyCredential(
+  ctx: ExtensionContext,
+  provider: Provider<Api>,
+): Promise<LoginDialogResult> {
+  const name = provider.auth.apiKey?.name
+  if (name === undefined) {
+    return { error: new Error(`No API-key authentication for ${provider.name}`) }
+  }
+  const input = await ctx.ui.input(`Enter ${name}:`, '')
+  if (input === undefined) return undefined
+  const key = input.trim()
+  if (key === '') return { error: new Error('API key is required') }
+  return { credential: { type: 'api_key', key } }
 }
 
 export async function showLoginDialog(

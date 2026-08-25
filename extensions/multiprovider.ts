@@ -15,7 +15,7 @@ import {
   type SchedulerSettingsPatch,
   type SelectionPolicy,
 } from '../src/index.ts'
-import { selectLogin, showLoginDialog } from '../src/multilogin.ts'
+import { promptApiKeyCredential, selectLogin, showLoginDialog } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -314,19 +314,27 @@ export default function multiprovider(pi: ExtensionAPI): void {
       if (provider.auth.oauth?.login !== undefined) {
         methods.push({ label: provider.auth.oauth.loginLabel ?? provider.auth.oauth.name, value: 'oauth' })
       }
-      if (provider.auth.apiKey?.login !== undefined) {
-        methods.push({ label: `API key · ${provider.auth.apiKey.name}`, value: 'api_key' })
+      if (provider.auth.apiKey !== undefined) {
+        const interactive = provider.auth.apiKey.login !== undefined
+        methods.push({
+          label: interactive
+            ? `API key · ${provider.auth.apiKey.name}`
+            : `API key · ${provider.auth.apiKey.name} (paste)`,
+          value: interactive ? 'api_key' : 'api_key_paste',
+        })
       }
 
       let result = await openPoolManager(ctx, provider, callbacks, methods)
       while (result.type === 'add') {
-        const authType: AuthType = result.authType
+        const method = result.method
         const existing = await store.getPool(provider.id)
         const defaultLabel = `${provider.name} ${(existing?.accounts.length ?? 0) + 1}`
         const labelInput = await ctx.ui.input('Account label:', defaultLabel)
         if (labelInput !== undefined) {
           const label = labelInput.trim() || defaultLabel
-          const login = await showLoginDialog(ctx, { provider, authType })
+          const login = method === 'api_key_paste'
+            ? await promptApiKeyCredential(ctx, provider)
+            : await showLoginDialog(ctx, { provider, authType: method as AuthType })
           if (login !== undefined && 'error' in login) {
             ctx.ui.notify(`Failed to authenticate ${provider.name}: ${login.error.message}`, 'error')
           } else if (login !== undefined) {
