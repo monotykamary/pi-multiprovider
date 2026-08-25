@@ -162,7 +162,7 @@ function upstreamRow(
   return setting(
     'upstream',
     `${label} (upstream)`,
-    state.poolExists ? upstreamSummary(state) : `✓ ${state.upstreamSource ?? 'configured'} · pending pool`,
+    state.poolExists ? upstreamSummary(state) : `${state.upstreamSource ?? 'configured'} · pending pool ✓`,
     {
       description:
         "Pi's own /login, auth.json, environment, or ambient credential. Resolves live on every request and pools alongside stored accounts.",
