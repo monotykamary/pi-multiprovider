@@ -78,8 +78,8 @@ function upstreamLabel(state: PoolManagerState): string {
 }
 
 function upstreamSummary(state: PoolManagerState): string {
-  if (!state.includeUpstream) return 'not pooled'
-  return `pooled · weight ${state.upstream.weight ?? 1} · priority ${state.upstream.priority ?? 0}`
+  if (!state.includeUpstream) return 'disabled'
+  return `weight ${state.upstream.weight ?? 1} · priority ${state.upstream.priority ?? 0}`
 }
 
 function accountSummary(account: MultiAuthAccount): string {
@@ -169,33 +169,38 @@ function buildView(
       description: 'Keep a healthy account pinned to this session instead of re-selecting on every request.',
       values: BOOLEANS,
     }),
-    setting('upstream', `${label} (upstream)`, upstreamSummary(state), {
-      description: "Pi's normal /login, auth.json, environment, or ambient credential, participating in the pool like a stored account.",
-      submenu: sectionSubmenu(
-        theme,
-        `${label} (upstream auth)`,
-        "Pi's own credential resolves live on every request; these settings tune how the pool schedules it.",
-        [
-          setting('upstream.enabled', 'Include in pool', state.includeUpstream ? 'true' : 'false', {
-            description: 'Treat /login, auth.json, environment, and ambient auth as a pool account. Off makes this pool multilogin-only.',
-            values: BOOLEANS,
+    ...(state.poolExists
+      ? [
+          setting('upstream', `${label} (upstream)`, upstreamSummary(state), {
+            description:
+              "Pi's own /login, auth.json, environment, or ambient credential. Resolves live on every request and pools alongside stored accounts.",
+            submenu: sectionSubmenu(
+              theme,
+              label,
+              "Pi's own credential resolves live on every request. It cannot be removed—disable it to exclude it from the pool.",
+              [
+                setting('upstream.enabled', 'Enabled', state.includeUpstream ? 'true' : 'false', {
+                  description: 'While enabled, this credential pools with stored accounts. Disabled, this pool runs multilogin accounts only.',
+                  values: BOOLEANS,
+                }),
+                setting('upstream.label', 'Label', label, {
+                  description: `Shown in /accounts and selectors. Empty restores "${UPSTREAM_DEFAULT_LABEL}".`,
+                  submenu: stringInputSubmenu(theme, 'Account label', `Empty restores "${UPSTREAM_DEFAULT_LABEL}".`),
+                }),
+                setting('upstream.weight', 'Weight', String(state.upstream.weight ?? 1), {
+                  description: 'Relative share under the weighted round robin strategy.',
+                  submenu: integerInputSubmenu(theme, 'Account weight', 'Relative share under weighted round robin (1 or more).', 1),
+                }),
+                setting('upstream.priority', 'Priority', String(state.upstream.priority ?? 0), {
+                  description: 'Lower runs first under the priority failover strategy.',
+                  submenu: integerInputSubmenu(theme, 'Account priority', 'Lower runs first under the priority strategy (0 or more).', 0),
+                }),
+              ],
+              persist,
+            ),
           }),
-          setting('upstream.label', 'Label', label, {
-            description: `Shown in /accounts and selectors. Empty restores "${UPSTREAM_DEFAULT_LABEL}".`,
-            submenu: stringInputSubmenu(theme, 'Upstream label', `Empty restores "${UPSTREAM_DEFAULT_LABEL}".`),
-          }),
-          setting('upstream.weight', 'Weight', String(state.upstream.weight ?? 1), {
-            description: 'Relative share under the weighted round robin strategy.',
-            submenu: integerInputSubmenu(theme, 'Upstream weight', 'Relative share under weighted round robin (1 or more).', 1),
-          }),
-          setting('upstream.priority', 'Priority', String(state.upstream.priority ?? 0), {
-            description: 'Lower runs first under the priority failover strategy.',
-            submenu: integerInputSubmenu(theme, 'Upstream priority', 'Lower runs first under the priority strategy (0 or more).', 0),
-          }),
-        ],
-        persist,
-      ),
-    }),
+        ]
+      : []),
     ...state.accounts.map((account) =>
       setting(`account.${account.id}`, account.label, accountSummary(account), {
         description: `${account.authKind} credential stored in multiprovider-auth.json.`,
@@ -279,7 +284,7 @@ function buildView(
     title: `${provider.name} pool`,
     subtitle: state.poolExists
       ? `${state.accounts.length} stored ${state.accounts.length === 1 ? 'account' : 'accounts'} · changes save immediately`
-      : 'No pool yet · pool and upstream settings apply once the first account is added',
+      : 'No pool yet · settings apply once the first account is added',
     items: markDrillIn(items),
   }
 }

@@ -10,7 +10,6 @@ import {
   MULTIPROVIDER_REGISTER_EVENT,
   MultiAuthStore,
   MultiProviderService,
-  type MultiAuthUpstreamPreferences,
   type MultiProviderIntegration,
   type SchedulerSettingsPatch,
   type SelectionPolicy,
@@ -243,14 +242,12 @@ export default function multiprovider(pi: ExtensionAPI): void {
         policy: SelectionPolicy
         affinity: boolean
         includeUpstream: boolean
-        upstream: MultiAuthUpstreamPreferences
       }
       const initialPool = await store.getPool(provider.id)
       let buffer: BufferedPool = {
         policy: initialPool?.policy ?? 'round-robin',
         affinity: initialPool?.affinity ?? true,
         includeUpstream: initialPool?.includeUpstream ?? true,
-        upstream: { ...(initialPool?.upstream ?? {}) },
       }
 
       const callbacks: PoolManagerCallbacks = {
@@ -263,7 +260,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
               policy: buffer.policy,
               affinity: buffer.affinity,
               includeUpstream: buffer.includeUpstream,
-              upstream: { ...buffer.upstream },
+              upstream: {},
               accounts: [],
               scheduler,
             }
@@ -272,7 +269,6 @@ export default function multiprovider(pi: ExtensionAPI): void {
             policy: pool.policy,
             affinity: pool.affinity,
             includeUpstream: pool.includeUpstream,
-            upstream: { ...(pool.upstream ?? {}) },
           }
           return {
             poolExists: true,
@@ -289,7 +285,6 @@ export default function multiprovider(pi: ExtensionAPI): void {
             if (settings.policy !== undefined) buffer.policy = settings.policy
             if (settings.affinity !== undefined) buffer.affinity = settings.affinity
             if (settings.includeUpstream !== undefined) buffer.includeUpstream = settings.includeUpstream
-            if (settings.upstream !== undefined) buffer.upstream = { ...settings.upstream }
             return
           }
           await store.updatePool(provider.id, settings)
@@ -316,10 +311,10 @@ export default function multiprovider(pi: ExtensionAPI): void {
       }
       if (provider.auth.apiKey !== undefined) {
         const interactive = provider.auth.apiKey.login !== undefined
+        const keyName = provider.auth.apiKey.name
+        const baseLabel = keyName === 'API key' ? 'API key' : `API key · ${keyName}`
         methods.push({
-          label: interactive
-            ? `API key · ${provider.auth.apiKey.name}`
-            : `API key · ${provider.auth.apiKey.name} (paste)`,
+          label: interactive ? baseLabel : `${baseLabel} (paste)`,
           value: interactive ? 'api_key' : 'api_key_paste',
         })
       }
@@ -349,7 +344,6 @@ export default function multiprovider(pi: ExtensionAPI): void {
                         policy: buffer.policy,
                         affinity: buffer.affinity,
                         includeUpstream: buffer.includeUpstream,
-                        upstream: buffer.upstream,
                       },
                     }
                   : {}),
