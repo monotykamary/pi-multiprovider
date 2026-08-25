@@ -10,11 +10,12 @@ import {
   MULTIPROVIDER_REGISTER_EVENT,
   MultiAuthStore,
   MultiProviderService,
+  type MultiAuthUpstreamPreferences,
   type MultiProviderIntegration,
   type SchedulerSettingsPatch,
   type SelectionPolicy,
 } from '../src/index.ts'
-import { promptApiKeyCredential, selectLogin, showLoginDialog } from '../src/multilogin.ts'
+import { promptApiKeyCredential, probeSessionRuntime, selectLogin, showLoginDialog } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -238,33 +239,45 @@ export default function multiprovider(pi: ExtensionAPI): void {
         policy: SelectionPolicy
         affinity: boolean
         includeUpstream: boolean
+        upstream: MultiAuthUpstreamPreferences
       }
       const initialPool = await store.getPool(provider.id)
       let buffer: BufferedPool = {
         policy: initialPool?.policy ?? 'round-robin',
         affinity: initialPool?.affinity ?? true,
         includeUpstream: initialPool?.includeUpstream ?? true,
+        upstream: { ...(initialPool?.upstream ?? {}) },
       }
 
       const callbacks: PoolManagerCallbacks = {
         async loadState() {
           const pool = await store.getPool(provider.id)
           const scheduler = await store.getSchedulerSettings()
+          const runtime = probeSessionRuntime(ctx)
+          const upstreamStatus = runtime?.getProviderAuthStatus(provider.id)
+          const upstreamConfigured = upstreamStatus !== undefined && upstreamStatus.configured
+          const upstreamSource = upstreamConfigured ? (upstreamStatus.label ?? upstreamStatus.source) : undefined
+          const upstreamState = {
+            ...(upstreamConfigured ? { upstreamConfigured } : {}),
+            ...(upstreamSource === undefined ? {} : { upstreamSource }),
+          }
           if (pool === undefined) {
             return {
               poolExists: false,
               policy: buffer.policy,
               affinity: buffer.affinity,
               includeUpstream: buffer.includeUpstream,
-              upstream: {},
+              upstream: { ...buffer.upstream },
               accounts: [],
               scheduler,
+              ...upstreamState,
             }
           }
           buffer = {
             policy: pool.policy,
             affinity: pool.affinity,
             includeUpstream: pool.includeUpstream,
+            upstream: { ...(pool.upstream ?? {}) },
           }
           return {
             poolExists: true,
@@ -274,6 +287,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
             upstream: { ...(pool.upstream ?? {}) },
             accounts: pool.accounts,
             scheduler,
+            ...upstreamState,
           }
         },
         async updatePool(settings) {
@@ -281,6 +295,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
             if (settings.policy !== undefined) buffer.policy = settings.policy
             if (settings.affinity !== undefined) buffer.affinity = settings.affinity
             if (settings.includeUpstream !== undefined) buffer.includeUpstream = settings.includeUpstream
+            if (settings.upstream !== undefined) buffer.upstream = { ...settings.upstream }
             return
           }
           await store.updatePool(provider.id, settings)
@@ -340,6 +355,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
                         policy: buffer.policy,
                         affinity: buffer.affinity,
                         includeUpstream: buffer.includeUpstream,
+                        upstream: buffer.upstream,
                       },
                     }
                   : {}),

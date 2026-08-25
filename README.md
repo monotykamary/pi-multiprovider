@@ -134,7 +134,7 @@ API-key credentials use the provider's native `resolve()` method, including prov
 
 When **Pi default** is enabled, the lifted auth method first lets Pi resolve its normal credential. Multiprovider marks only the names—not values—of credential-specific headers and environment fields. If a stored account is selected, stale upstream auth fields and credential-specific base URLs are removed before transport.
 
-Inside `/multilogin` the **Pi default** credential appears in the pool's account list like any stored account: relabel it, raise or lower its weight (default 1) and priority (default 0), or disable it so only multilogin accounts run. Pool, account, upstream, and scheduler settings persist alongside the credentials in `multiprovider-auth.json`. The manager's **Scheduler** section overrides the global failure cooldowns live: rate limit (60s), quota (15m), auth (5m), transient base (1s, doubling per consecutive failure), and the 60m cap.
+Inside `/multilogin` the **Pi default** credential appears in the pool's account list like any stored account: relabel it, raise or lower its weight (default 1) and priority (default 0), or disable it so only multilogin accounts run. When no pool exists yet but `/login` already has a credential configured, it is listed as pending so it can be preconfigured before the first stored account. The credential value itself stays Pi-owned—rotate or replace it through `/login`. Pool, account, upstream, and scheduler settings persist alongside the credentials in `multiprovider-auth.json`. The manager's **Scheduler** section overrides the global failure cooldowns live: rate limit (60s), quota (15m), auth (5m), transient base (1s, doubling per consecutive failure), and the 60m cap.
 
 ## Failover semantics
 

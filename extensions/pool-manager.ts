@@ -39,6 +39,8 @@ export interface PoolManagerState {
   upstream: MultiAuthUpstreamPreferences
   accounts: MultiAuthAccount[]
   scheduler: SchedulerSettings
+  upstreamConfigured?: boolean
+  upstreamSource?: string
 }
 
 export interface PoolManagerCallbacks {
@@ -169,9 +171,15 @@ function buildView(
       description: 'Keep a healthy account pinned to this session instead of re-selecting on every request.',
       values: BOOLEANS,
     }),
-    ...(state.poolExists
+    ...(state.poolExists || state.upstreamConfigured === true
       ? [
-          setting('upstream', `${label} (upstream)`, upstreamSummary(state), {
+          setting(
+            'upstream',
+            `${label} (upstream)`,
+            state.poolExists
+              ? upstreamSummary(state)
+              : `✓ ${state.upstreamSource ?? 'configured'} · pending pool`,
+            {
             description:
               "Pi's own /login, auth.json, environment, or ambient credential. Resolves live on every request and pools alongside stored accounts.",
             submenu: sectionSubmenu(
@@ -284,7 +292,9 @@ function buildView(
     title: `${provider.name} pool`,
     subtitle: state.poolExists
       ? `${state.accounts.length} stored ${state.accounts.length === 1 ? 'account' : 'accounts'} · changes save immediately`
-      : 'No pool yet · settings apply once the first account is added',
+      : state.upstreamConfigured === true
+        ? 'No pool yet · upstream credential detected · settings apply once the first account is added'
+        : 'No pool yet · settings apply once the first account is added',
     items: markDrillIn(items),
   }
 }

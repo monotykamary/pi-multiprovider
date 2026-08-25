@@ -46,7 +46,7 @@ interface SessionRuntime {
   isUsingOAuth(id: string): boolean
 }
 
-function sessionRuntime(ctx: ExtensionContext): SessionRuntime | undefined {
+export function probeSessionRuntime(ctx: ExtensionContext): SessionRuntime | undefined {
   const candidate = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime
   if (typeof candidate !== 'object' || candidate === null) return undefined
   const runtime = candidate as Record<keyof SessionRuntime, unknown>
@@ -86,7 +86,7 @@ export async function selectLogin(
   providerRef?: string,
 ): Promise<LoginSelection | undefined> {
   const normalized = providerRef?.trim().toLowerCase()
-  const runtime = sessionRuntime(ctx)
+  const runtime = probeSessionRuntime(ctx)
   const all = runtime === undefined ? providers : runtime.getProviders()
   const scoped = normalized === undefined || normalized === ''
     ? all
