@@ -148,6 +148,158 @@ function cooldownRow(
   })
 }
 
+const WEIGHT_DESCRIPTION =
+  'Traffic share under weighted round robin: 3 vs 1 gives roughly three of every four requests. 1 is an equal share.'
+const PRIORITY_DESCRIPTION =
+  'Failover order under the priority strategy: smaller numbers run first (0 before 1), falling back only while a lower number cools down.'
+
+function upstreamRow(
+  theme: Theme,
+  state: PoolManagerState,
+  persist: (id: string, value: string) => void,
+): SettingItem {
+  const label = upstreamLabel(state)
+  return setting(
+    'upstream',
+    `${label} (upstream)`,
+    state.poolExists ? upstreamSummary(state) : `✓ ${state.upstreamSource ?? 'configured'} · pending pool`,
+    {
+      description:
+        "Pi's own /login, auth.json, environment, or ambient credential. Resolves live on every request and pools alongside stored accounts.",
+      submenu: sectionSubmenu(
+        theme,
+        label,
+        "Pi's own credential resolves live on every request. It cannot be removed—disable it to exclude it from the pool.",
+        [
+          setting('upstream.enabled', 'Enabled', state.includeUpstream ? 'true' : 'false', {
+            description: 'While enabled, this credential pools with stored accounts. Disabled, this pool runs multilogin accounts only.',
+            values: BOOLEANS,
+          }),
+          setting('upstream.label', 'Label', label, {
+            description: `Shown in /accounts and selectors. Empty restores "${UPSTREAM_DEFAULT_LABEL}".`,
+            submenu: stringInputSubmenu(theme, 'Account label', `Empty restores "${UPSTREAM_DEFAULT_LABEL}".`),
+          }),
+          setting('upstream.weight', 'Weight', String(state.upstream.weight ?? 1), {
+            description: WEIGHT_DESCRIPTION,
+            submenu: integerInputSubmenu(theme, 'Weight', WEIGHT_DESCRIPTION, 1),
+          }),
+          setting('upstream.priority', 'Priority', String(state.upstream.priority ?? 0), {
+            description: PRIORITY_DESCRIPTION,
+            submenu: integerInputSubmenu(theme, 'Priority', PRIORITY_DESCRIPTION, 0),
+          }),
+        ],
+        persist,
+      ),
+    },
+  )
+}
+
+function storedAccountRow(
+  theme: Theme,
+  account: MultiAuthAccount,
+  persist: (id: string, value: string) => void,
+): SettingItem {
+  return setting(`stored.${account.id}`, account.label, accountSummary(account), {
+    description: `${account.authKind} credential stored in multiprovider-auth.json.`,
+    submenu: sectionSubmenu(
+      theme,
+      account.label,
+      'Stored multilogin account. Values apply to the next selection.',
+      [
+        setting(`account.${account.id}.label`, 'Label', account.label, {
+          description: 'Non-secret display label for this credential.',
+          submenu: stringInputSubmenu(theme, 'Account label', 'Non-secret display label for this credential.'),
+        }),
+        setting(`account.${account.id}.enabled`, 'Enabled', account.enabled ? 'true' : 'false', {
+          description: 'Disabled accounts are skipped by selection and failover.',
+          values: BOOLEANS,
+        }),
+        setting(`account.${account.id}.weight`, 'Weight', String(account.weight), {
+          description: WEIGHT_DESCRIPTION,
+          submenu: integerInputSubmenu(theme, 'Weight', WEIGHT_DESCRIPTION, 1),
+        }),
+        setting(`account.${account.id}.priority`, 'Priority', String(account.priority), {
+          description: PRIORITY_DESCRIPTION,
+          submenu: integerInputSubmenu(theme, 'Priority', PRIORITY_DESCRIPTION, 0),
+        }),
+        setting(`account.${account.id}.remove`, 'Remove account', '', {
+          description: 'Permanently deletes this stored credential.',
+          submenu: (_currentValue, done) =>
+            new SelectSubmenu(
+              theme,
+              `Remove ${account.label}?`,
+              "The stored credential is deleted; Pi's normal /login credential is unchanged.",
+              [
+                { value: 'keep', label: 'Cancel' },
+                { value: 'remove', label: `Remove ${account.label}` },
+              ],
+              'keep',
+              (value) => (value === 'remove' ? done(REMOVE_SENTINEL) : done()),
+              () => done(),
+            ),
+        }),
+      ],
+      persist,
+    ),
+  })
+}
+
+function accountsSummary(state: PoolManagerState): string {
+  const parts: string[] = []
+  if (state.poolExists) parts.push(state.includeUpstream ? '1 upstream' : '1 upstream (disabled)')
+  else if (state.upstreamConfigured === true) parts.push('1 upstream (pending)')
+  const stored = state.accounts.length
+  if (stored > 0) {
+    const disabled = state.accounts.filter(account => !account.enabled).length
+    parts.push(disabled === 0 ? `${stored} stored` : `${stored} stored, ${disabled} disabled`)
+  }
+  return parts.length === 0 ? 'empty' : parts.join(' · ')
+}
+
+function accountsSection(
+  theme: Theme,
+  state: PoolManagerState,
+  methods: readonly PoolManagerAuthMethod[],
+  provider: Provider<Api>,
+  persist: (id: string, value: string) => void,
+): SettingItem {
+  const rows: SettingItem[] = []
+  if (state.poolExists || state.upstreamConfigured === true) rows.push(upstreamRow(theme, state, persist))
+  for (const account of state.accounts) rows.push(storedAccountRow(theme, account, persist))
+  if (rows.length === 0) {
+    rows.push(setting('accounts.none', 'No accounts yet', '', {
+      description: 'Use the Add account row below to store a credential for this pool.',
+    }))
+  }
+  if (methods.length > 0) {
+    rows.push(
+      setting('accounts.add', 'Add account', methods.map((method) => method.label).join(' · '), {
+        description: 'Run the provider login flow and store a new pooled credential.',
+        submenu: (_currentValue, done) =>
+          new SelectSubmenu(
+            theme,
+            `Add ${provider.name} account`,
+            'Choose the login method for the new account.',
+            methods.map((method) => ({ value: method.value, label: method.label })),
+            methods[0]!.value,
+            (value) => done(`${ADD_SENTINEL_PREFIX}${value}`),
+            () => done(),
+          ),
+      }),
+    )
+  }
+  return setting('accounts', 'Accounts', accountsSummary(state), {
+    description: "Credentials pooled for this provider: Pi's upstream /login credential plus stored multilogin accounts.",
+    submenu: sectionSubmenu(
+      theme,
+      `${provider.name} accounts`,
+      'Each credential participating in this pool. Values apply to the next selection.',
+      rows,
+      persist,
+    ),
+  })
+}
+
 interface PoolManagerView {
   title: string
   subtitle: string
@@ -161,7 +313,6 @@ function buildView(
   methods: readonly PoolManagerAuthMethod[],
   persist: (id: string, value: string) => void,
 ): PoolManagerView {
-  const label = upstreamLabel(state)
   const items: SettingItem[] = [
     setting('pool.policy', 'Strategy', state.policy, {
       description: 'How the pool picks the next account for each request.',
@@ -171,106 +322,7 @@ function buildView(
       description: 'Keep a healthy account pinned to this session instead of re-selecting on every request.',
       values: BOOLEANS,
     }),
-    ...(state.poolExists || state.upstreamConfigured === true
-      ? [
-          setting(
-            'upstream',
-            `${label} (upstream)`,
-            state.poolExists
-              ? upstreamSummary(state)
-              : `✓ ${state.upstreamSource ?? 'configured'} · pending pool`,
-            {
-            description:
-              "Pi's own /login, auth.json, environment, or ambient credential. Resolves live on every request and pools alongside stored accounts.",
-            submenu: sectionSubmenu(
-              theme,
-              label,
-              "Pi's own credential resolves live on every request. It cannot be removed—disable it to exclude it from the pool.",
-              [
-                setting('upstream.enabled', 'Enabled', state.includeUpstream ? 'true' : 'false', {
-                  description: 'While enabled, this credential pools with stored accounts. Disabled, this pool runs multilogin accounts only.',
-                  values: BOOLEANS,
-                }),
-                setting('upstream.label', 'Label', label, {
-                  description: `Shown in /accounts and selectors. Empty restores "${UPSTREAM_DEFAULT_LABEL}".`,
-                  submenu: stringInputSubmenu(theme, 'Account label', `Empty restores "${UPSTREAM_DEFAULT_LABEL}".`),
-                }),
-                setting('upstream.weight', 'Weight', String(state.upstream.weight ?? 1), {
-                  description: 'Relative share under the weighted round robin strategy.',
-                  submenu: integerInputSubmenu(theme, 'Account weight', 'Relative share under weighted round robin (1 or more).', 1),
-                }),
-                setting('upstream.priority', 'Priority', String(state.upstream.priority ?? 0), {
-                  description: 'Lower runs first under the priority failover strategy.',
-                  submenu: integerInputSubmenu(theme, 'Account priority', 'Lower runs first under the priority strategy (0 or more).', 0),
-                }),
-              ],
-              persist,
-            ),
-          }),
-        ]
-      : []),
-    ...state.accounts.map((account) =>
-      setting(`account.${account.id}`, account.label, accountSummary(account), {
-        description: `${account.authKind} credential stored in multiprovider-auth.json.`,
-        submenu: sectionSubmenu(
-          theme,
-          account.label,
-          'Stored multilogin account. Values apply to the next selection.',
-          [
-            setting(`account.${account.id}.label`, 'Label', account.label, {
-              description: 'Non-secret display label for this credential.',
-              submenu: stringInputSubmenu(theme, 'Account label', 'Non-secret display label for this credential.'),
-            }),
-            setting(`account.${account.id}.enabled`, 'Enabled', account.enabled ? 'true' : 'false', {
-              description: 'Disabled accounts are skipped by selection and failover.',
-              values: BOOLEANS,
-            }),
-            setting(`account.${account.id}.weight`, 'Weight', String(account.weight), {
-              description: 'Relative share under the weighted round robin strategy.',
-              submenu: integerInputSubmenu(theme, 'Account weight', 'Relative share under weighted round robin (1 or more).', 1),
-            }),
-            setting(`account.${account.id}.priority`, 'Priority', String(account.priority), {
-              description: 'Lower runs first under the priority failover strategy.',
-              submenu: integerInputSubmenu(theme, 'Account priority', 'Lower runs first under the priority strategy (0 or more).', 0),
-            }),
-            setting(`account.${account.id}.remove`, 'Remove account', '', {
-              description: 'Permanently deletes this stored credential.',
-              submenu: (_currentValue, done) =>
-                new SelectSubmenu(
-                  theme,
-                  `Remove ${account.label}?`,
-                  "The stored credential is deleted; Pi's normal /login credential is unchanged.",
-                  [
-                    { value: 'keep', label: 'Cancel' },
-                    { value: 'remove', label: `Remove ${account.label}` },
-                  ],
-                  'keep',
-                  (value) => (value === 'remove' ? done(REMOVE_SENTINEL) : done()),
-                  () => done(),
-                ),
-            }),
-          ],
-          persist,
-        ),
-      }),
-    ),
-    ...(methods.length === 0
-      ? []
-      : [
-          setting('pool.add-account', 'Add account', methods.map((method) => method.label).join(' · '), {
-            description: 'Run the provider login flow and store a new pooled credential.',
-            submenu: (_currentValue, done) =>
-              new SelectSubmenu(
-                theme,
-                `Add ${provider.name} account`,
-                'Choose the login method for the new account.',
-                methods.map((method) => ({ value: method.value, label: method.label })),
-                methods[0]!.value,
-                (value) => done(`${ADD_SENTINEL_PREFIX}${value}`),
-                () => done(),
-              ),
-          }),
-        ]),
+    accountsSection(theme, state, methods, provider, persist),
     setting('scheduler', 'Scheduler', schedulerSummary(state.scheduler), {
       description: 'Global failure cooldowns applied to every pool. Saves immediately.',
       submenu: sectionSubmenu(
@@ -359,7 +411,7 @@ export class PoolManagerComponent extends Container {
 
 function selectAfterFor(id: string): string {
   const segments = id.split('.')
-  if (segments[0] === 'account' && segments.length >= 2) return `account.${segments[1]}`
+  if (segments[0] === 'account' || segments[0] === 'upstream' || segments[0] === 'stored') return 'accounts'
   return segments[0] ?? id
 }
 
@@ -402,7 +454,7 @@ export async function openPoolManager(
     }
 
     async function dispatch(id: string, value: string): Promise<void> {
-      if (id === 'pool.add-account' && value.startsWith(ADD_SENTINEL_PREFIX)) {
+      if (id === 'accounts.add' && value.startsWith(ADD_SENTINEL_PREFIX)) {
         exit({ type: 'add', method: value.slice(ADD_SENTINEL_PREFIX.length) })
         return
       }

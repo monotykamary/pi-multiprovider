@@ -90,7 +90,7 @@ The flow:
 1. Searches providers and authentication methods exactly where Pi's `/login` UI does.
 2. Opens the pool manager, a settings view mirroring Pi's `/settings`: fuzzy search, inline value cycling, and drill-in submenus.
 3. The **Add account** row asks for a non-secret label and runs the provider's own login implementation—including pasting an API key for providers without an interactive flow—then returns to the manager.
-4. Every other row edits live settings: pool strategy and session affinity, the **Pi default** upstream entry, each stored account, and scheduler cooldowns.
+4. Every other row edits live settings: pool strategy and session affinity, an **Accounts** section grouping every pooled credential—**Pi default (upstream)** plus stored accounts—with per-account weight (traffic share) and priority (failover order), and scheduler cooldowns.
 
 Add as many accounts as you need from the same manager. Remove credentials from an account's submenu or with `/multilogout`; Pi's regular `/logout` and `auth.json` remain independent.
 
