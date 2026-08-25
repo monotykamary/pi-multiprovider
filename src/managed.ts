@@ -204,11 +204,11 @@ export function createManagedIntegration<TApi extends Api>(
     if (pool.includeUpstream) {
       result.push({
         id: PI_UPSTREAM_ACCOUNT_ID,
-        label: 'Pi default',
+        label: pool.upstream?.label ?? 'Pi default',
         authKind: 'custom',
         credentialRef: PI_UPSTREAM_ACCOUNT_ID,
-        weight: 1,
-        priority: 0,
+        weight: pool.upstream?.weight ?? 1,
+        priority: pool.upstream?.priority ?? 0,
         metadata: { source: 'auth.json, environment, or provider ambient auth' },
       })
     }
@@ -230,7 +230,7 @@ export function createManagedIntegration<TApi extends Api>(
     label: provider.name,
     accounts,
     auth: mergeProviderAuth(provider as Provider<Api>, () => store.hasAccounts(provider.id)),
-    managementHint: 'Use /multilogin to add accounts and /multilogout to remove them.',
+    managementHint: 'Use /multilogin to manage the pool and /multilogout to remove accounts quickly.',
     excludeAccountIds(request: AccountRequestContext<TApi>) {
       return readMarker(request.requestOptions)?.available === true
         ? []

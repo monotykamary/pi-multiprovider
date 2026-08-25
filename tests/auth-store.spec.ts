@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -147,5 +147,75 @@ describe('MultiAuthStore', () => {
     ])
     expect(refreshes).toBe(1)
     expect(JSON.stringify(await store.getPool('example'))).not.toContain('refreshed-access')
+  })
+})
+
+describe('MultiAuthStore upstream preferences and scheduler settings', () => {
+  it('stores, normalizes, and clears upstream preferences per pool', async () => {
+    const { store } = await storeFixture()
+    await store.addAccount('example', {
+      label: 'Extra',
+      credential: { type: 'api_key', key: 'test-secret-upstream' },
+    })
+    const pool = await store.updatePool('example', {
+      upstream: { label: '  Team key  ', weight: 4.9, priority: 2.7 },
+    })
+    expect(pool.upstream).toEqual({ label: 'Team key', weight: 4, priority: 2 })
+    const cleared = await store.updatePool('example', { upstream: {} })
+    expect(cleared.upstream).toBeUndefined()
+    expect((await store.getPool('example'))?.upstream).toBeUndefined()
+  })
+
+  it('persists upstream preferences when the first account creates the pool', async () => {
+    const { directory, store } = await storeFixture()
+    await store.addAccount('example', {
+      label: 'Extra',
+      credential: { type: 'api_key', key: 'test-secret-upstream' },
+      pool: { policy: 'priority', upstream: { label: 'Home', weight: 3 } },
+    })
+    const reread = new MultiAuthStore(join(directory, 'multiprovider-auth.json'))
+    const pool = await reread.getPool('example')
+    expect(pool).toMatchObject({ policy: 'priority', upstream: { label: 'Home', weight: 3 } })
+  })
+
+  it('rejects malformed upstream preferences on load', async () => {
+    const { directory, store } = await storeFixture()
+    await writeFile(
+      join(directory, 'multiprovider-auth.json'),
+      JSON.stringify({
+        version: 1,
+        providers: {
+          example: {
+            policy: 'round-robin',
+            affinity: true,
+            includeUpstream: true,
+            upstream: { weight: 'heavy' },
+            accounts: [],
+          },
+        },
+      }),
+    )
+    await expect(store.getPool('example')).rejects.toThrow('malformed upstream weight')
+  })
+
+  it('round-trips scheduler settings and clears keys back to defaults', async () => {
+    const { directory, store } = await storeFixture()
+    expect(await store.getSchedulerSettings()).toEqual({})
+    await store.updateSchedulerSettings({ rateLimitCooldownMs: 5_000, quotaCooldownMs: 60_000 })
+    await store.updateSchedulerSettings({ rateLimitCooldownMs: undefined, authCooldownMs: 30_000 })
+    const reread = new MultiAuthStore(join(directory, 'multiprovider-auth.json'))
+    expect(await reread.getSchedulerSettings()).toEqual({
+      quotaCooldownMs: 60_000,
+      authCooldownMs: 30_000,
+    })
+  })
+
+  it('drops the scheduler block when the last override clears and rejects invalid values', async () => {
+    const { directory, store } = await storeFixture()
+    await store.updateSchedulerSettings({ rateLimitCooldownMs: 1_234 })
+    await store.updateSchedulerSettings({ rateLimitCooldownMs: undefined })
+    const text = await readFile(join(directory, 'multiprovider-auth.json'), 'utf8')
+    expect(JSON.parse(text)).toEqual({ version: 1, providers: {} })
+    await expect(store.updateSchedulerSettings({ rateLimitCooldownMs: -1 })).rejects.toThrow('non-negative')
   })
 })

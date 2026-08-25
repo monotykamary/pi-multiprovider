@@ -114,6 +114,28 @@ export interface PublicPoolSnapshot {
 
 export interface MultiProviderSnapshot { providers: PublicPoolSnapshot[] }
 
+export interface SchedulerSettings {
+  rateLimitCooldownMs?: number
+  quotaCooldownMs?: number
+  authCooldownMs?: number
+  transientBaseCooldownMs?: number
+  maxCooldownMs?: number
+}
+
+// Patch form of SchedulerSettings where an explicitly undefined key clears
+// the stored override under exactOptionalPropertyTypes.
+export type SchedulerSettingsPatch = {
+  [K in keyof SchedulerSettings]?: SchedulerSettings[K] | undefined
+}
+
+export const SCHEDULER_SETTING_KEYS = [
+  'rateLimitCooldownMs',
+  'quotaCooldownMs',
+  'authCooldownMs',
+  'transientBaseCooldownMs',
+  'maxCooldownMs',
+] as const satisfies readonly (keyof SchedulerSettings)[]
+
 export interface SchedulerOptions {
   defaultPolicy?: SelectionPolicy
   affinity?: boolean

@@ -1,6 +1,6 @@
 {
   "name": "pi-multiprovider",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "packageManager": "pnpm@11.20.0",
   "description": "Same-provider multi-account pooling, OAuth storage, and safe in-stream auth failover for Pi",
   "homepage": "https://github.com/monotykamary/pi-multiprovider#readme",
@@ -59,11 +59,13 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.84.3",
     "@earendil-works/pi-coding-agent": "^0.84.3",
+    "@earendil-works/pi-tui": "^0.84.3",
     "@types/node": "^22.20.0",
     "tsdown": "^0.22.2",
     "typescript": "^5.9.3",

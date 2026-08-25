@@ -1,4 +1,4 @@
-import type { Api, Credential, Provider } from '@earendil-works/pi-ai'
+import type { Api, AuthType, Credential, Provider } from '@earendil-works/pi-ai'
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -10,19 +10,19 @@ import {
   MULTIPROVIDER_REGISTER_EVENT,
   MultiAuthStore,
   MultiProviderService,
+  type MultiAuthUpstreamPreferences,
   type MultiProviderIntegration,
+  type SchedulerSettingsPatch,
   type SelectionPolicy,
 } from '../src/index.ts'
 import { selectLogin, showLoginDialog } from '../src/multilogin.ts'
+import {
+  openPoolManager,
+  type PoolManagerAuthMethod,
+  type PoolManagerCallbacks,
+} from './pool-manager.ts'
 
 type AnyIntegration = MultiProviderIntegration<Api, unknown>
-
-const strategyLabels: ReadonlyArray<{ label: string; value: SelectionPolicy }> = [
-  { label: 'Round robin · rotate evenly', value: 'round-robin' },
-  { label: 'Weighted round robin · distribute by account weight', value: 'weighted-round-robin' },
-  { label: 'Least in flight · favor free capacity', value: 'least-inflight' },
-  { label: 'Priority failover · use the first healthy account', value: 'priority' },
-]
 
 function isIntegration(value: unknown): value is AnyIntegration {
   if (typeof value !== 'object' || value === null) return false
@@ -51,7 +51,7 @@ function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot
         ? ''
         : ` · cooldown until ${new Date(account.cooldownUntil).toLocaleTimeString()}`
       lines.push(
-        `  ${account.label} (${account.authKind}) · ${account.status} · ${account.inFlight} in flight · ${account.consecutiveFailures} failures${cooldown}`,
+        `  ${account.label} (${account.authKind}) · ${account.status} · w${account.weight} · p${account.priority} · ${account.inFlight} in flight · ${account.consecutiveFailures} failures${cooldown}`,
       )
     }
   }
@@ -71,63 +71,6 @@ function uniqueProviders(
     if (provider !== undefined) providers.push(provider)
   }
   return providers.sort((left, right) => left.name.localeCompare(right.name))
-}
-
-async function chooseStrategy(
-  ctx: ExtensionContext,
-  current: SelectionPolicy | undefined,
-): Promise<SelectionPolicy | undefined> {
-  const ordered = current === undefined
-    ? strategyLabels
-    : [
-        ...strategyLabels.filter(option => option.value === current),
-        ...strategyLabels.filter(option => option.value !== current),
-      ]
-  const selected = await ctx.ui.select('Pool strategy:', ordered.map(option => option.label))
-  return ordered.find(option => option.label === selected)?.value
-}
-
-async function chooseBoolean(
-  ctx: ExtensionContext,
-  title: string,
-  enabledLabel: string,
-  disabledLabel: string,
-  current: boolean,
-): Promise<boolean | undefined> {
-  const options = current ? [enabledLabel, disabledLabel] : [disabledLabel, enabledLabel]
-  const selected = await ctx.ui.select(title, options)
-  if (selected === undefined) return undefined
-  return selected === enabledLabel
-}
-
-async function positiveInteger(
-  ctx: ExtensionContext,
-  title: string,
-  fallback: number,
-): Promise<number | undefined> {
-  const value = await ctx.ui.input(title, String(fallback))
-  if (value === undefined) return undefined
-  const parsed = Number(value.trim() === '' ? fallback : value)
-  if (!Number.isInteger(parsed) || parsed <= 0) {
-    ctx.ui.notify(`${title} must be a positive integer.`, 'error')
-    return undefined
-  }
-  return parsed
-}
-
-async function integer(
-  ctx: ExtensionContext,
-  title: string,
-  fallback: number,
-): Promise<number | undefined> {
-  const value = await ctx.ui.input(title, String(fallback))
-  if (value === undefined) return undefined
-  const parsed = Number(value.trim() === '' ? fallback : value)
-  if (!Number.isInteger(parsed)) {
-    ctx.ui.notify(`${title} must be an integer.`, 'error')
-    return undefined
-  }
-  return parsed
 }
 
 export default function multiprovider(pi: ExtensionAPI): void {
@@ -243,6 +186,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
   }
 
   const reconcile = async (ctx: ExtensionContext): Promise<void> => {
+    service.updateSchedulerDefaults(await store.getSchedulerSettings())
     await refreshManaged(ctx)
     const ids = new Set([
       ...externalIntegrations.keys(),
@@ -279,7 +223,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
   })
 
   pi.registerCommand('multilogin', {
-    description: 'Add an API-key or OAuth account to a provider pool',
+    description: 'Manage a provider pool, Pi default auth, schedulers, and accounts',
     handler: async (args, ctx) => {
       if (!ctx.hasUI || ctx.mode !== 'tui') {
         ctx.ui.notify('/multilogin requires Pi interactive mode.', 'warning')
@@ -293,64 +237,128 @@ export default function multiprovider(pi: ExtensionAPI): void {
       )
       const selection = await selectLogin(ctx, providers, counts, args.trim() || undefined)
       if (selection === undefined) return
+      const provider = selection.provider
 
-      const currentPool = await store.getPool(selection.provider.id)
-      const defaultLabel = `${selection.provider.name} ${currentPool?.accounts.length === undefined ? 1 : currentPool.accounts.length + 1}`
-      const labelInput = await ctx.ui.input('Account label:', defaultLabel)
-      if (labelInput === undefined) return
-      const label = labelInput.trim() || defaultLabel
-      const policy = await chooseStrategy(ctx, currentPool?.policy)
-      if (policy === undefined) return
-      const affinity = await chooseBoolean(
-        ctx,
-        'Session affinity:',
-        'On · keep a healthy account for this session',
-        'Off · select for every request',
-        currentPool?.affinity ?? true,
-      )
-      if (affinity === undefined) return
-      const includeUpstream = await chooseBoolean(
-        ctx,
-        'Include Pi default auth in this pool?',
-        'Yes · merge /login, auth.json, environment, and ambient auth',
-        'No · use only multilogin accounts',
-        currentPool?.includeUpstream ?? true,
-      )
-      if (includeUpstream === undefined) return
-      const weight = policy === 'weighted-round-robin'
-        ? await positiveInteger(ctx, 'Account weight:', 1)
-        : 1
-      if (weight === undefined) return
-      const priority = policy === 'priority'
-        ? await integer(ctx, 'Account priority (lower runs first):', (currentPool?.accounts.length ?? 0) + 1)
-        : (currentPool?.accounts.length ?? 0) + 1
-      if (priority === undefined) return
-
-      const login = await showLoginDialog(ctx, selection)
-      if (login === undefined) return
-      if ('error' in login) {
-        ctx.ui.notify(`Failed to authenticate ${selection.provider.name}: ${login.error.message}`, 'error')
-        return
+      interface BufferedPool {
+        policy: SelectionPolicy
+        affinity: boolean
+        includeUpstream: boolean
+        upstream: MultiAuthUpstreamPreferences
+      }
+      const initialPool = await store.getPool(provider.id)
+      let buffer: BufferedPool = {
+        policy: initialPool?.policy ?? 'round-robin',
+        affinity: initialPool?.affinity ?? true,
+        includeUpstream: initialPool?.includeUpstream ?? true,
+        upstream: { ...(initialPool?.upstream ?? {}) },
       }
 
-      let credential: Credential | undefined = login.credential
-      try {
-        await store.addAccount(selection.provider.id, {
-          label,
-          credential,
-          weight,
-          priority,
-          pool: { policy, affinity, includeUpstream },
-        })
-        credential = undefined
-        await reconcile(ctx)
-        ctx.ui.notify(
-          `Added ${label.trim()} to ${selection.provider.name}. Credentials saved to ${getMultiAuthPath()}`,
-          'info',
-        )
-      } catch (error) {
-        credential = undefined
-        ctx.ui.notify(`Could not save account: ${errorText(error)}`, 'error')
+      const callbacks: PoolManagerCallbacks = {
+        async loadState() {
+          const pool = await store.getPool(provider.id)
+          const scheduler = await store.getSchedulerSettings()
+          if (pool === undefined) {
+            return {
+              poolExists: false,
+              policy: buffer.policy,
+              affinity: buffer.affinity,
+              includeUpstream: buffer.includeUpstream,
+              upstream: { ...buffer.upstream },
+              accounts: [],
+              scheduler,
+            }
+          }
+          buffer = {
+            policy: pool.policy,
+            affinity: pool.affinity,
+            includeUpstream: pool.includeUpstream,
+            upstream: { ...(pool.upstream ?? {}) },
+          }
+          return {
+            poolExists: true,
+            policy: pool.policy,
+            affinity: pool.affinity,
+            includeUpstream: pool.includeUpstream,
+            upstream: { ...(pool.upstream ?? {}) },
+            accounts: pool.accounts,
+            scheduler,
+          }
+        },
+        async updatePool(settings) {
+          if (await store.getPool(provider.id) === undefined) {
+            if (settings.policy !== undefined) buffer.policy = settings.policy
+            if (settings.affinity !== undefined) buffer.affinity = settings.affinity
+            if (settings.includeUpstream !== undefined) buffer.includeUpstream = settings.includeUpstream
+            if (settings.upstream !== undefined) buffer.upstream = { ...settings.upstream }
+            return
+          }
+          await store.updatePool(provider.id, settings)
+          await reconcile(ctx)
+        },
+        async updateAccount(accountId, settings) {
+          await store.updateAccount(provider.id, accountId, settings)
+          await reconcile(ctx)
+        },
+        async removeAccount(accountId) {
+          await store.removeAccount(provider.id, accountId)
+          await reconcile(ctx)
+        },
+        async updateScheduler(key, valueMs) {
+          const patch: SchedulerSettingsPatch = { [key]: valueMs }
+          const effective = await store.updateSchedulerSettings(patch)
+          service.updateSchedulerDefaults(effective)
+        },
+      }
+
+      const methods: PoolManagerAuthMethod[] = []
+      if (provider.auth.oauth?.login !== undefined) {
+        methods.push({ label: provider.auth.oauth.loginLabel ?? provider.auth.oauth.name, value: 'oauth' })
+      }
+      if (provider.auth.apiKey?.login !== undefined) {
+        methods.push({ label: `API key · ${provider.auth.apiKey.name}`, value: 'api_key' })
+      }
+
+      let result = await openPoolManager(ctx, provider, callbacks, methods)
+      while (result.type === 'add') {
+        const authType: AuthType = result.authType
+        const existing = await store.getPool(provider.id)
+        const defaultLabel = `${provider.name} ${(existing?.accounts.length ?? 0) + 1}`
+        const labelInput = await ctx.ui.input('Account label:', defaultLabel)
+        if (labelInput !== undefined) {
+          const label = labelInput.trim() || defaultLabel
+          const login = await showLoginDialog(ctx, { provider, authType })
+          if (login !== undefined && 'error' in login) {
+            ctx.ui.notify(`Failed to authenticate ${provider.name}: ${login.error.message}`, 'error')
+          } else if (login !== undefined) {
+            let credential: Credential | undefined = login.credential
+            try {
+              await store.addAccount(provider.id, {
+                label,
+                credential,
+                ...(await store.getPool(provider.id) === undefined
+                  ? {
+                      pool: {
+                        policy: buffer.policy,
+                        affinity: buffer.affinity,
+                        includeUpstream: buffer.includeUpstream,
+                        upstream: buffer.upstream,
+                      },
+                    }
+                  : {}),
+              })
+              credential = undefined
+              await reconcile(ctx)
+              ctx.ui.notify(
+                `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
+                'info',
+              )
+            } catch (error) {
+              credential = undefined
+              ctx.ui.notify(`Could not save account: ${errorText(error)}`, 'error')
+            }
+          }
+        }
+        result = await openPoolManager(ctx, provider, callbacks, methods)
       }
     },
   })

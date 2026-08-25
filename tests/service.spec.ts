@@ -4,6 +4,7 @@ import {
   NoAccountAvailableError,
   type ProviderAccount,
   type ProviderAttemptFailure,
+  SCHEDULER_DEFAULTS,
 } from '../src/index.ts'
 
 const accounts: ProviderAccount<string>[] = [
@@ -125,5 +126,20 @@ describe('MultiProviderService', () => {
     })
     service.resetHealth('example', 'a')
     expect((await service.snapshot()).providers[0]?.accounts.find(item => item.id === 'a')?.status).toBe('disabled')
+  })
+
+  it('updates scheduler cooldowns live via updateSchedulerDefaults', async () => {
+    let now = 1_000
+    const service = scheduler({ now: () => now })
+    service.updateSchedulerDefaults({ rateLimitCooldownMs: 250 })
+    const lease = await service.acquire({ providerId: 'example', excludeAccountIds: ['b'] })
+    expect(lease.release({ status: 'failure', error: failure(429) })).toMatchObject({
+      kind: 'rate-limit',
+      retryable: true,
+    })
+    const account = (await service.snapshot()).providers[0]?.accounts.find(item => item.id === 'a')
+    expect(account?.cooldownUntil).toBe(1_250)
+    expect(SCHEDULER_DEFAULTS.rateLimitCooldownMs).toBe(60_000)
+    expect(() => service.updateSchedulerDefaults({ rateLimitCooldownMs: -1 })).toThrow('non-negative')
   })
 })

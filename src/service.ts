@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { NoAccountAvailableError, UnknownProviderError } from './errors.ts'
+import { SCHEDULER_SETTING_KEYS } from './types.ts'
 import type {
   AccountLease,
   AccountPreference,
@@ -13,6 +14,7 @@ import type {
   ProviderAttemptFailure,
   ProviderRegistration,
   PublicAccountSnapshot,
+  SchedulerSettings,
   PublicPoolSnapshot,
   SchedulerOptions,
   SelectionPolicy,
@@ -42,6 +44,14 @@ const DEFAULTS = {
   authCooldownMs: 5 * 60_000,
   transientBaseCooldownMs: 1_000,
   maxCooldownMs: 60 * 60_000,
+}
+
+export const SCHEDULER_DEFAULTS: Required<SchedulerSettings> = {
+  rateLimitCooldownMs: DEFAULTS.rateLimitCooldownMs,
+  quotaCooldownMs: DEFAULTS.quotaCooldownMs,
+  authCooldownMs: DEFAULTS.authCooldownMs,
+  transientBaseCooldownMs: DEFAULTS.transientBaseCooldownMs,
+  maxCooldownMs: DEFAULTS.maxCooldownMs,
 }
 
 function stateKey(providerId: string, accountId: string): string {
@@ -243,6 +253,17 @@ export class MultiProviderService {
   getPoolPreference(providerId: string): PoolPreference {
     this.registration(providerId)
     return this.pool(providerId)
+  }
+
+  updateSchedulerDefaults(settings: SchedulerSettings): void {
+    for (const key of SCHEDULER_SETTING_KEYS) {
+      const value = settings[key]
+      if (value === undefined) continue
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error(`multiprovider: scheduler setting "${key}" must be a non-negative number`)
+      }
+      this.defaults[key] = value
+    }
   }
 
   resetHealth(providerId: string, accountId: string): void {

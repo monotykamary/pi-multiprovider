@@ -16,6 +16,7 @@ import {
   liftProvider,
   MultiAuthStore,
   MultiProviderService,
+  PI_UPSTREAM_ACCOUNT_ID,
 } from '../src/index.ts'
 
 const temporaryDirectories: string[] = []
@@ -187,5 +188,60 @@ describe('managed account integration', () => {
         extraEnv: 'extra',
       },
     ])
+  })
+
+  it('applies stored upstream preferences to the Pi default account listing', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'pi-multiprovider-managed-'))
+    temporaryDirectories.push(directory)
+    const store = new MultiAuthStore(join(directory, 'multiprovider-auth.json'))
+    await store.addAccount(model.provider, {
+      label: 'Extra',
+      credential: { type: 'api_key', key: 'extra-key' },
+      pool: { upstream: { label: 'Team account', weight: 5, priority: 3 } },
+    })
+    const provider = createProvider<'test-api'>({
+      id: model.provider,
+      name: 'Same Provider',
+      auth: {
+        apiKey: {
+          name: 'Same Provider API key',
+          async resolve() {
+            return undefined
+          },
+        },
+      },
+      models: [model],
+      api: {
+        stream() {
+          throw new Error('not used')
+        },
+        streamSimple() {
+          throw new Error('not used')
+        },
+      },
+    })
+
+    const integration = createManagedIntegration(provider, store)
+    const accounts = await integration.accounts()
+    expect(accounts[0]).toMatchObject({
+      id: PI_UPSTREAM_ACCOUNT_ID,
+      label: 'Team account',
+      weight: 5,
+      priority: 3,
+    })
+    expect(accounts[1]).toMatchObject({ label: 'Extra' })
+
+    await store.updatePool(model.provider, { upstream: {} })
+    const defaulted = await integration.accounts()
+    expect(defaulted[0]).toMatchObject({
+      id: PI_UPSTREAM_ACCOUNT_ID,
+      label: 'Pi default',
+      weight: 1,
+      priority: 0,
+    })
+
+    await store.updatePool(model.provider, { includeUpstream: false })
+    const without = await integration.accounts()
+    expect(without.map(account => account.id)).not.toContain(PI_UPSTREAM_ACCOUNT_ID)
   })
 })

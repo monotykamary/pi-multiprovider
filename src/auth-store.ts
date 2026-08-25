@@ -11,7 +11,8 @@ import type {
   Provider,
 } from '@earendil-works/pi-ai'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
-import type { AuthKind, SelectionPolicy } from './types.ts'
+import { SCHEDULER_SETTING_KEYS } from './types.ts'
+import type { AuthKind, SchedulerSettings, SchedulerSettingsPatch, SelectionPolicy } from './types.ts'
 
 export const MULTIPROVIDER_AUTH_FILE = 'multiprovider-auth.json'
 
@@ -26,11 +27,18 @@ export interface MultiAuthAccount {
   updatedAt: string
 }
 
+export interface MultiAuthUpstreamPreferences {
+  label?: string
+  weight?: number
+  priority?: number
+}
+
 export interface MultiAuthPool {
   providerId: string
   policy: SelectionPolicy
   affinity: boolean
   includeUpstream: boolean
+  upstream?: MultiAuthUpstreamPreferences
   accounts: MultiAuthAccount[]
 }
 
@@ -47,6 +55,7 @@ export interface MultiAuthPoolSettings {
   policy?: SelectionPolicy
   affinity?: boolean
   includeUpstream?: boolean
+  upstream?: MultiAuthUpstreamPreferences
 }
 
 export interface MultiAuthAccountSettings {
@@ -64,11 +73,13 @@ interface PersistedPool {
   policy: SelectionPolicy
   affinity: boolean
   includeUpstream: boolean
+  upstream?: MultiAuthUpstreamPreferences
   accounts: PersistedAccount[]
 }
 
 interface PersistedState {
   version: 1
+  scheduler?: SchedulerSettings
   providers: Record<string, PersistedPool>
 }
 
@@ -96,6 +107,35 @@ function assertCredential(value: unknown): asserts value is Credential {
   }
 }
 
+function assertUpstreamPreferences(value: unknown): asserts value is MultiAuthUpstreamPreferences {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('multiprovider: malformed upstream preferences')
+  }
+  const candidate = value as Record<string, unknown>
+  if (candidate.label !== undefined && typeof candidate.label !== 'string') {
+    throw new Error('multiprovider: malformed upstream label')
+  }
+  for (const key of ['weight', 'priority'] as const) {
+    const entry = candidate[key]
+    if (entry !== undefined && (typeof entry !== 'number' || !Number.isFinite(entry))) {
+      throw new Error(`multiprovider: malformed upstream ${key}`)
+    }
+  }
+}
+
+function assertSchedulerSettings(value: unknown): asserts value is SchedulerSettings {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('multiprovider: malformed scheduler settings')
+  }
+  const candidate = value as Record<string, unknown>
+  for (const key of SCHEDULER_SETTING_KEYS) {
+    const entry = candidate[key]
+    if (entry !== undefined && (typeof entry !== 'number' || !Number.isFinite(entry) || entry < 0)) {
+      throw new Error(`multiprovider: malformed scheduler setting "${key}"`)
+    }
+  }
+}
+
 function parseState(text: string): PersistedState {
   const value: unknown = JSON.parse(text)
   if (typeof value !== 'object' || value === null) {
@@ -105,6 +145,7 @@ function parseState(text: string): PersistedState {
   if (candidate.version !== 1 || typeof candidate.providers !== 'object' || candidate.providers === null) {
     throw new Error('multiprovider: unsupported auth store format')
   }
+  if (candidate.scheduler !== undefined) assertSchedulerSettings(candidate.scheduler)
   for (const [providerId, poolValue] of Object.entries(candidate.providers)) {
     assertSafeKey(providerId, 'provider id')
     if (typeof poolValue !== 'object' || poolValue === null) {
@@ -114,6 +155,7 @@ function parseState(text: string): PersistedState {
     if (!Array.isArray(pool.accounts)) {
       throw new Error(`multiprovider: malformed accounts for "${providerId}"`)
     }
+    if (pool.upstream !== undefined) assertUpstreamPreferences(pool.upstream)
     for (const accountValue of pool.accounts) {
       if (typeof accountValue !== 'object' || accountValue === null) {
         throw new Error(`multiprovider: malformed account for "${providerId}"`)
@@ -140,6 +182,7 @@ function publicPool(providerId: string, pool: PersistedPool): MultiAuthPool {
     policy: pool.policy,
     affinity: pool.affinity,
     includeUpstream: pool.includeUpstream,
+    ...(pool.upstream === undefined ? {} : { upstream: { ...pool.upstream } }),
     accounts: pool.accounts.map(publicAccount),
   }
 }
@@ -150,6 +193,19 @@ function normalizeWeight(value: number | undefined): number {
 
 function normalizePriority(value: number | undefined, fallback: number): number {
   return Number.isFinite(value) ? Math.floor(value!) : fallback
+}
+
+export function normalizeUpstreamPreferences(
+  input: MultiAuthUpstreamPreferences,
+): MultiAuthUpstreamPreferences {
+  const normalized: MultiAuthUpstreamPreferences = {}
+  if (input.label !== undefined) {
+    const label = input.label.trim()
+    if (label !== '') normalized.label = label
+  }
+  if (input.weight !== undefined) normalized.weight = normalizeWeight(input.weight)
+  if (input.priority !== undefined) normalized.priority = normalizePriority(input.priority, 0)
+  return normalized
 }
 
 function expandPath(path: string): string {
@@ -240,6 +296,11 @@ export class MultiAuthStore {
       if (input.pool?.policy !== undefined) pool.policy = input.pool.policy
       if (input.pool?.affinity !== undefined) pool.affinity = input.pool.affinity
       if (input.pool?.includeUpstream !== undefined) pool.includeUpstream = input.pool.includeUpstream
+      if (input.pool?.upstream !== undefined) {
+        const upstream = normalizeUpstreamPreferences({ ...pool.upstream, ...input.pool.upstream })
+        if (Object.keys(upstream).length === 0) delete pool.upstream
+        else pool.upstream = upstream
+      }
       const now = new Date().toISOString()
       const account: PersistedAccount = {
         id: randomUUID(),
@@ -277,6 +338,11 @@ export class MultiAuthStore {
       if (settings.policy !== undefined) pool.policy = settings.policy
       if (settings.affinity !== undefined) pool.affinity = settings.affinity
       if (settings.includeUpstream !== undefined) pool.includeUpstream = settings.includeUpstream
+      if (settings.upstream !== undefined) {
+        const upstream = normalizeUpstreamPreferences(settings.upstream)
+        if (Object.keys(upstream).length === 0) delete pool.upstream
+        else pool.upstream = upstream
+      }
       return publicPool(providerId, pool)
     })
   }
@@ -299,6 +365,35 @@ export class MultiAuthStore {
       if (settings.priority !== undefined) account.priority = normalizePriority(settings.priority, account.priority)
       account.updatedAt = new Date().toISOString()
       return publicAccount(account)
+    })
+  }
+
+  async getSchedulerSettings(): Promise<SchedulerSettings> {
+    const state = await this.readState()
+    const current = state.scheduler ?? {}
+    const result: Partial<Record<(typeof SCHEDULER_SETTING_KEYS)[number], number>> = {}
+    for (const key of SCHEDULER_SETTING_KEYS) {
+      const value = current[key]
+      if (value !== undefined) result[key] = value
+    }
+    return { ...result } as SchedulerSettings
+  }
+
+  async updateSchedulerSettings(settings: SchedulerSettingsPatch): Promise<SchedulerSettings> {
+    return this.mutate(state => {
+      const current = state.scheduler ?? {}
+      const next: Partial<Record<(typeof SCHEDULER_SETTING_KEYS)[number], number>> = {}
+      for (const key of SCHEDULER_SETTING_KEYS) {
+        const value = key in settings ? settings[key] : current[key]
+        if (value === undefined) continue
+        if (!Number.isFinite(value) || value < 0) {
+          throw new Error(`multiprovider: scheduler setting "${key}" must be a non-negative number`)
+        }
+        next[key] = value
+      }
+      if (Object.keys(next).length === 0) delete state.scheduler
+      else state.scheduler = { ...next } as SchedulerSettings
+      return { ...next } as SchedulerSettings
     })
   }
 
