@@ -63,8 +63,8 @@ pi install git:github.com/monotykamary/pi-multiprovider
 From a local checkout:
 
 ```bash
-pnpm install
-pnpm build
+bun install
+bun run build
 pi install /absolute/path/to/pi-multiprovider
 ```
 
@@ -223,16 +223,16 @@ Current limits:
 ## Development
 
 ```bash
-pnpm install
-pnpm run typecheck
-pnpm run test
-pnpm run build
+bun install
+bun run typecheck
+bun run test
+bun run build
 ```
 
 The full release gate is:
 
 ```bash
-pnpm run check
+bun run check
 npm pack --dry-run
 ```
 

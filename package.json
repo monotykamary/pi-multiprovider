@@ -1,7 +1,6 @@
 {
   "name": "pi-multiprovider",
   "version": "0.2.7",
-  "packageManager": "pnpm@11.20.0",
   "description": "Same-provider multi-account pooling, OAuth storage, and safe in-stream auth failover for Pi",
   "homepage": "https://github.com/monotykamary/pi-multiprovider#readme",
   "repository": {
@@ -33,11 +32,11 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "pnpm run typecheck && tsdown",
-    "prepack": "pnpm run build",
+    "build": "bun run typecheck && tsdown",
+    "prepack": "bun run build",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json",
-    "check": "pnpm run typecheck && pnpm run test && pnpm run build"
+    "check": "bun run typecheck && bun run test && bun run build"
   },
   "keywords": [
     "pi-package",
