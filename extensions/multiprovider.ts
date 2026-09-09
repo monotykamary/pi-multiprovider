@@ -3,8 +3,9 @@ import {
   DynamicBorder,
   type ExtensionAPI,
   type ExtensionContext,
+  type Theme,
 } from '@earendil-works/pi-coding-agent'
-import { Container, fuzzyFilter, Input, Text } from '@earendil-works/pi-tui'
+import { Container, SettingsList, Spacer, Text } from '@earendil-works/pi-tui'
 import {
   createManagedIntegration,
   createServiceAnnouncement,
@@ -40,8 +41,51 @@ type VirtualBackendRef = import('../src/index.ts').VirtualBackend
 interface SearchableOption {
   value: string
   label: string
-  /** Extra text matched by the filter in addition to the label. */
-  searchText?: string
+}
+
+// Same dialog pattern as the /fabric settings view: a bordered container
+// holding a searchable SettingsList whose built-in search input, blank-line
+// spacing, dim hints, and accent cursor match pi's settings styling.
+class SearchableSelectDialog extends Container {
+  private readonly settingsList: SettingsList
+
+  constructor(
+    theme: Theme,
+    title: string,
+    options: SearchableOption[],
+    onSelect: (value: string) => void,
+    onCancel: () => void,
+  ) {
+    super()
+    this.addChild(new DynamicBorder(s => theme.fg('border', s)))
+    this.addChild(new Text(theme.fg('muted', 'Selecting: ') + theme.fg('accent', title), 1, 0))
+    this.addChild(new Spacer(1))
+    this.settingsList = new SettingsList(
+      options.map(option => ({
+        id: option.value,
+        label: option.label,
+        currentValue: '',
+        values: [option.value],
+      })),
+      10,
+      {
+        label: (text, selected) => (selected ? theme.fg('accent', text) : text),
+        value: () => '',
+        description: text => theme.fg('dim', text),
+        cursor: theme.fg('accent', '→ '),
+        hint: text => theme.fg('dim', text),
+      },
+      onSelect,
+      onCancel,
+      { enableSearch: true },
+    )
+    this.addChild(this.settingsList)
+    this.addChild(new DynamicBorder(s => theme.fg('border', s)))
+  }
+
+  handleInput(data: string): void {
+    this.settingsList.handleInput(data)
+  }
 }
 
 function isIntegration(value: unknown): value is AnyIntegration {
@@ -376,89 +420,16 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     await refreshVirtual()
   }
 
-  // Fixed-height, type-to-filter selection dialog modeled on the core /model
-  // picker: an Input filters a scrolled list of rows with fuzzy matching, and
-  // the scheduler keybindings route up/down/enter/escape to the list while
-  // every other key feeds the filter.
+  // Fixed-height, type-to-filter selection dialog following the /fabric
+  // settings pattern (searchable SettingsList in a bordered container).
   const searchableSelect = async (
     ctx: ExtensionContext,
     title: string,
     options: SearchableOption[],
   ): Promise<string | undefined> => {
     if (options.length === 0) return undefined
-    const maxVisible = 10
-    const result = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
-      let query = ''
-      let selectedIndex = 0
-      let filtered = options
-      const container = new Container()
-      container.addChild(new DynamicBorder(s => theme.fg('accent', s)))
-      container.addChild(new Text(theme.fg('accent', theme.bold(title)), 1, 0))
-      const searchInput = new Input({ placeholder: 'filter' })
-      searchInput.focused = true
-      container.addChild(searchInput)
-      const listContainer = new Container()
-      container.addChild(listContainer)
-      container.addChild(new Text(theme.fg('dim', 'type to filter · ↑↓ select · enter confirm · esc cancel'), 1, 0))
-      container.addChild(new DynamicBorder(s => theme.fg('accent', s)))
-
-      const updateList = () => {
-        listContainer.clear()
-        if (filtered.length === 0) {
-          listContainer.addChild(new Text(theme.fg('muted', '  No matches'), 0, 0))
-          return
-        }
-        const startIndex = Math.max(0, Math.min(
-          selectedIndex - Math.floor(maxVisible / 2),
-          filtered.length - maxVisible,
-        ))
-        const endIndex = Math.min(startIndex + maxVisible, filtered.length)
-        for (let index = startIndex; index < endIndex; index++) {
-          const option = filtered[index]!
-          const cursor = index === selectedIndex ? theme.fg('accent', '→ ') : '  '
-          listContainer.addChild(new Text(cursor + option.label, 0, 0))
-        }
-        if (startIndex > 0 || endIndex < filtered.length) {
-          listContainer.addChild(new Text(theme.fg('muted', `  (${selectedIndex + 1}/${filtered.length})`), 0, 0))
-        }
-      }
-
-      const refilter = () => {
-        const needle = query.trim()
-        filtered = needle === '' ? options : fuzzyFilter(options, needle, option => option.searchText ?? option.label)
-        selectedIndex = Math.min(selectedIndex, Math.max(0, filtered.length - 1))
-        updateList()
-      }
-
-      updateList()
-      return {
-        render: width => container.render(width),
-        invalidate: () => container.invalidate(),
-        handleInput: data => {
-          if (keybindings.matches(data, 'tui.select.up')) {
-            if (filtered.length > 0) selectedIndex = (selectedIndex - 1 + filtered.length) % filtered.length
-          } else if (keybindings.matches(data, 'tui.select.down')) {
-            if (filtered.length > 0) selectedIndex = (selectedIndex + 1) % filtered.length
-          } else if (keybindings.matches(data, 'tui.select.confirm')) {
-            const option = filtered[selectedIndex]
-            if (option !== undefined) done(option.value)
-            return
-          } else if (keybindings.matches(data, 'tui.select.cancel')) {
-            done(null)
-            return
-          } else {
-            searchInput.handleInput(data)
-            const next = searchInput.getValue()
-            if (next !== query) {
-              query = next
-              refilter()
-            }
-          }
-          updateList()
-          tui.requestRender()
-        },
-      }
-    })
+    const result = await ctx.ui.custom<string | null>((_tui, theme, _keybindings, done) =>
+      new SearchableSelectDialog(theme, title, options, value => done(value), () => done(null)))
     return result ?? undefined
   }
 
@@ -524,7 +495,6 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         const modelId = await searchableSelect(ctx, `Backing model for ${chosen.name}:`, catalog.map(candidate => ({
           value: candidate.id,
           label: `${candidate.id} · ${candidate.name}`,
-          searchText: `${candidate.id} ${candidate.name}`,
         })))
         const backingModel = catalog.find(candidate => candidate.id === modelId)
         if (backingModel === undefined) continue
