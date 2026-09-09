@@ -71,9 +71,9 @@ class SearchableSelectDialog extends Container {
       {
         label: (text, selected) => (selected ? theme.fg('accent', text) : text),
         value: () => '',
-        description: text => theme.fg('dim', text),
+        description: text => theme.fg('muted', text),
         cursor: theme.fg('accent', '→ '),
-        hint: text => theme.fg('dim', text),
+        hint: text => theme.fg('muted', text),
       },
       onSelect,
       onCancel,
