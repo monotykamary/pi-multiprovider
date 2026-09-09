@@ -5,14 +5,17 @@ import type {
 } from '@earendil-works/pi-coding-agent'
 import {
   createManagedIntegration,
+  createServiceAnnouncement,
   getMultiAuthPath,
   liftProvider,
   MULTIPROVIDER_REGISTER_EVENT,
+  MULTIPROVIDER_SERVICE_EVENT,
   MultiAuthStore,
   MultiProviderService,
   PI_UPSTREAM_ACCOUNT_ID,
   type MultiAuthUpstreamPreferences,
   type MultiProviderIntegration,
+  type MultiProviderServiceContext,
   type PublicAccountSnapshot,
   type SchedulerSettingsPatch,
   type SelectionPolicy,
@@ -134,12 +137,12 @@ export default function multiprovider(pi: ExtensionAPI): void {
   // message history cannot be reproduced here and fall back to the session id.
   const sessionAffinityKey = (
     integration: AnyIntegration,
-    ctx: ExtensionContext,
-    model: NonNullable<ExtensionContext['model']>,
+    ctx: MultiProviderServiceContext,
+    model: ExtensionContext['model'],
     providerId: string,
   ): string => {
     const fallback = ctx.sessionManager.getSessionId()
-    if (integration.affinityKey === undefined) return fallback
+    if (integration.affinityKey === undefined || model === undefined) return fallback
     const provider = baseProviders.get(providerId)
       ?? ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
     if (provider === undefined) return fallback
@@ -149,6 +152,24 @@ export default function multiprovider(pi: ExtensionAPI): void {
       return fallback
     }
   }
+
+  // Announced on MULTIPROVIDER_SERVICE_EVENT so sibling extensions can follow
+  // the session's active pooled account; re-emitted at factory load and on
+  // session start with the same stable object.
+  const announcement = createServiceAnnouncement({
+    scheduler: service,
+    getIntegration: effectiveIntegration,
+    getBaseProvider: (providerId, ctx) =>
+      baseProviders.get(providerId)
+      ?? ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined,
+    affinityKeyFor: (integration, ctx, providerId) =>
+      sessionAffinityKey(integration, ctx, ctx.model, providerId),
+  })
+
+  const announceService = (): void => {
+    pi.events.emit(MULTIPROVIDER_SERVICE_EVENT, announcement)
+  }
+  announceService()
 
   const restoreProvider = (providerId: string, ctx?: ExtensionContext): void => {
     const base = baseProviders.get(providerId)
@@ -257,6 +278,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
   pi.on('session_start', async (_event, ctx) => {
     currentContext = ctx
     await reconcile(ctx)
+    announceService()
   })
 
   pi.on('before_agent_start', async (_event, ctx) => {
@@ -527,6 +549,13 @@ export default function multiprovider(pi: ExtensionAPI): void {
         ? pin.accountId
         : undefined
 
+      // Sibling extensions following the active account (usage widgets and the
+      // like) re-resolve their account-scoped state from this notification.
+      const announceSwitch = async (): Promise<void> => {
+        const account = await announcement.getActiveAccount(providerId, ctx)
+        announcement.notifyActiveAccountChanged(providerId, ctx, account)
+      }
+
       const ref = args.trim()
       let automatic = false
       let chosen: PublicAccountSnapshot | undefined
@@ -559,6 +588,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
 
       if (automatic) {
         service.clearAffinity(providerId, affinityKey)
+        await announceSwitch()
         ctx.ui.notify(
           pool.affinity
             ? "Cleared this session's pinned account. The next request re-selects using the pool strategy."
@@ -580,6 +610,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
         ctx.ui.notify(`Could not switch account: ${errorText(error)}`, 'error')
         return
       }
+      await announceSwitch()
       const cooldown = account.cooldownUntil === undefined
         ? ''
         : ` It cools down until ${new Date(account.cooldownUntil).toLocaleTimeString()}; other accounts serve until it recovers.`

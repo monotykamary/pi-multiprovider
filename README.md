@@ -125,7 +125,7 @@ Session affinity can pin a healthy account to the current Pi session. Explicit r
 - **Automatic**—or `/switch-account auto`—clears the pin so the pool strategy selects again.
 - `/switch-account work` switches directly when the label matches exactly or by unique prefix.
 
-In-flight requests keep their leased account; only new requests observe the switch.
+In-flight requests keep their leased account; only new requests observe the switch. Sibling extensions can follow switches through the [`pi-multiprovider:service` event](#session-account-service-event).
 
 ## How auth merging works
 
@@ -177,7 +177,7 @@ The implementation was exercised against the actual sibling `pi-zro-provider` an
 | Second stored ZRO API key, no `ZRO_API_KEY` environment fallback | `ZRO_SECOND_OK` |
 | Priority-1 synthetic invalid key → priority-2 valid key, same `zro/deepseek-v4-flash-0731` stream | `ZRO_FAILOVER_OK` |
 
-The package also has direct Pi runtime probes and 25 deterministic tests covering scheduling, session account pinning, stream integrity, cancellation, secure storage, concurrent mutation, OAuth refresh locking, upstream auth scrubbing, upstream preference persistence, scheduler settings, pool-only availability, and simulated API-key/OAuth login flows.
+The package also has direct Pi runtime probes and 31 deterministic tests covering scheduling, session account pinning, the service announcement, stream integrity, cancellation, secure storage, concurrent mutation, OAuth refresh locking, upstream auth scrubbing, upstream preference persistence, scheduler settings, pool-only availability, and simulated API-key/OAuth login flows.
 
 ## Provider integration API
 
@@ -216,6 +216,28 @@ export default function providerExtension(pi: ExtensionAPI) {
 ```
 
 Credential references are intentionally opaque. Account inventory, refresh, billing, quota, and provider-specific metadata remain provider-owned. Re-announce after a provider re-registers dynamically; the bundled extension also reconciles its lift before every agent run.
+
+### Session account service event
+
+The bundled extension announces a small in-process service on `pi-multiprovider:service` (emitted at load and on session start) so sibling extensions can follow the session's active pooled account—for example, to refresh account-scoped subscription usage views after `/switch-account`:
+
+```ts
+import {
+  MULTIPROVIDER_SERVICE_EVENT,
+  type MultiProviderServiceAnnouncement,
+} from "pi-multiprovider"
+
+pi.events.on(MULTIPROVIDER_SERVICE_EVENT, value => {
+  // Duck-check value.getActiveAccount / resolveActiveAccountAuth /
+  // onActiveAccountChanged, or cast to MultiProviderServiceAnnouncement.
+})
+```
+
+- `getActiveAccount(providerId, ctx)` — the session's effective account: the explicit `/switch-account` pin, else the scheduler's last selection while pool affinity is on. `undefined` means selection is automatic or upstream, and callers should fall back to their own credential resolution.
+- `resolveActiveAccountAuth(providerId, ctx, signal?)` — resolves (refreshing OAuth under the account-store lock when needed) the active stored account's credential as `{ accessToken, label, source? }`. Returns `undefined` for the upstream account or when nothing is active, so consumers keep their existing fallback chain.
+- `onActiveAccountChanged(providerId, callback)` — fires after `/switch-account` pins or clears, with the triggering `ctx` and the new active account.
+
+Credential values are never broadcast in the event payload itself; only extensions that invoke the resolver receive them, and the private `multiprovider-auth.json` store is never read directly by consumers.
 
 For direct composition, the public package exports `MultiProviderService`, `liftProvider`, `MultiAuthStore`, `createManagedIntegration`, `mergeProviderAuth`, and all scheduler/integration types.
 

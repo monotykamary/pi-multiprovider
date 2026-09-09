@@ -2,6 +2,11 @@ export * from './types.ts'
 export * from './errors.ts'
 export * from './service.ts'
 export { liftProvider } from './lift.ts'
+export {
+  createServiceAnnouncement,
+  type AnnouncementDependencies,
+  type ServiceAnnouncementHandle,
+} from './announcement.ts'
 export { registerMultiProvider } from './register.ts'
 export * from './auth-store.ts'
 export {

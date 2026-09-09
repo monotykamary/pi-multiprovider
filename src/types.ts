@@ -8,6 +8,7 @@ import type {
   ProviderAuth,
   StreamOptions,
 } from '@earendil-works/pi-ai'
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
 
 export type AuthKind = 'api-key' | 'oauth' | 'service-account' | 'custom'
 export type SelectionPolicy = 'round-robin' | 'weighted-round-robin' | 'least-inflight' | 'priority'
@@ -196,3 +197,50 @@ export interface MultiProviderIntegration<TApi extends Api = Api, TCredentialRef
   extends ProviderRegistration<TCredentialRef>, LiftProviderOptions<TApi, TCredentialRef> {}
 
 export const MULTIPROVIDER_REGISTER_EVENT = 'pi-multiprovider:register'
+
+// Cross-extension service announcement. The bundled extension emits this event
+// with a MultiProviderServiceAnnouncement so sibling extensions can follow the
+// session's active pooled account (for example, to refresh account-scoped
+// subscription usage views after /switch-account).
+export const MULTIPROVIDER_SERVICE_EVENT = 'pi-multiprovider:service'
+
+// Context slice consumers pass to the announcement; the affinity key and base
+// provider lookups need only these fields.
+export type MultiProviderServiceContext = Pick<
+  ExtensionContext,
+  'modelRegistry' | 'model' | 'sessionManager'
+>
+
+export interface ActiveAccount {
+  id: string
+  label: string
+  authKind: AuthKind
+}
+
+export interface ActiveAccountAuth {
+  accessToken: string
+  label: string
+  source?: string
+}
+
+export interface ActiveAccountChangedEvent {
+  providerId: string
+  account: ActiveAccount | undefined
+  ctx: ExtensionContext
+}
+
+export interface MultiProviderServiceAnnouncement {
+  getActiveAccount(
+    providerId: string,
+    ctx: MultiProviderServiceContext,
+  ): Promise<ActiveAccount | undefined>
+  resolveActiveAccountAuth(
+    providerId: string,
+    ctx: MultiProviderServiceContext,
+    signal?: AbortSignal,
+  ): Promise<ActiveAccountAuth | undefined>
+  onActiveAccountChanged(
+    providerId: string,
+    callback: (event: ActiveAccountChangedEvent) => void,
+  ): () => void
+}
