@@ -41,6 +41,8 @@ type VirtualBackendRef = import('../src/index.ts').VirtualBackend
 interface SearchableOption {
   value: string
   label: string
+  /** Secondary text rendered dim on the right side of the row. */
+  secondary?: string
 }
 
 // Same dialog pattern as the /fabric settings view: a bordered container
@@ -64,13 +66,13 @@ class SearchableSelectDialog extends Container {
       options.map(option => ({
         id: option.value,
         label: option.label,
-        currentValue: '',
+        currentValue: option.secondary ?? '',
         values: [option.value],
       })),
       10,
       {
         label: (text, selected) => (selected ? theme.fg('accent', text) : text),
-        value: () => '',
+        value: text => theme.fg('dim', text),
         description: text => theme.fg('muted', text),
         cursor: theme.fg('accent', '→ '),
         hint: text => theme.fg('muted', text),
@@ -442,12 +444,14 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   ): Promise<boolean> => {
     const model = draft.models[0]!
     while (true) {
+      const dim = (text: string): string => ctx.ui.theme.fg('dim', text)
       const rows: string[] = [
         `Model id: ${model.id}`,
         'Add backing provider model',
         ...model.backends.map((backend, backendIndex) =>
-          `${backendIndex + 1}. ${backend.providerId} · ${backend.modelId}`
-          + ` · ${backend.enabled === false ? 'disabled' : 'enabled'} · w${backend.weight ?? 1}`),
+          `${backendIndex + 1}. `
+          + dim(`${backend.providerId} · ${backend.modelId}`
+            + ` · ${backend.enabled === false ? 'disabled' : 'enabled'} · w${backend.weight ?? 1}`)),
         'Save and apply',
         'Discard changes',
       ]
@@ -494,7 +498,8 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         const catalog = chosen.getModels()
         const modelId = await searchableSelect(ctx, `Backing model for ${chosen.name}:`, catalog.map(candidate => ({
           value: candidate.id,
-          label: `${candidate.id} · ${candidate.name}`,
+          label: candidate.id,
+          secondary: candidate.name,
         })))
         const backingModel = catalog.find(candidate => candidate.id === modelId)
         if (backingModel === undefined) continue
