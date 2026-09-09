@@ -5,7 +5,16 @@ import {
   type ExtensionContext,
   type Theme,
 } from '@earendil-works/pi-coding-agent'
-import { Container, SettingsList, Spacer, Text } from '@earendil-works/pi-tui'
+import {
+  Container,
+  type SettingItem,
+  SettingsList,
+  type SettingsListTheme,
+  Spacer,
+  Text,
+  truncateToWidth,
+  visibleWidth,
+} from '@earendil-works/pi-tui'
 import {
   createManagedIntegration,
   createServiceAnnouncement,
@@ -41,8 +50,55 @@ type VirtualBackendRef = import('../src/index.ts').VirtualBackend
 interface SearchableOption {
   value: string
   label: string
-  /** Secondary text rendered dim on the right side of the row. */
+  /** Secondary text rendered muted on the right side of the row. */
   secondary?: string
+}
+
+interface SettingsListInternals {
+  readonly searchEnabled: boolean
+  readonly searchInput: { render(width: number): string[] } | undefined
+  readonly theme: SettingsListTheme
+  readonly selectedIndex: number
+  getDisplayItems(): SettingItem[]
+  getVisibleRange(displayItems: SettingItem[]): { startIndex: number; endIndex: number }
+  addHintLine(lines: string[], width: number): void
+}
+
+// SettingsList caps the label column at 36 characters, so rows misalign once
+// a label runs longer; this variant sizes the value column to the longest
+// label actually displayed instead.
+class DynamicColumnSettingsList extends SettingsList {
+  override render(width: number): string[] {
+    const internal = this as unknown as SettingsListInternals
+    const lines: string[] = []
+    if (internal.searchEnabled && internal.searchInput) {
+      lines.push(...internal.searchInput.render(width))
+      lines.push('')
+    }
+    const displayItems = internal.getDisplayItems()
+    if (displayItems.length === 0) {
+      lines.push(truncateToWidth(internal.theme.hint('  No matching models'), width))
+      internal.addHintLine(lines, width)
+      return lines
+    }
+    const maxLabelWidth = Math.max(...displayItems.map(item => visibleWidth(item.label)))
+    const { startIndex, endIndex } = internal.getVisibleRange(displayItems)
+    for (let index = startIndex; index < endIndex; index++) {
+      const item = displayItems[index]!
+      const selected = index === internal.selectedIndex
+      const prefix = selected ? internal.theme.cursor : '  '
+      const labelPadded = item.label + ' '.repeat(Math.max(0, maxLabelWidth - visibleWidth(item.label)))
+      const separator = '  '
+      const valueMaxWidth = Math.max(0, width - visibleWidth(prefix) - maxLabelWidth - separator.length - 2)
+      const valueText = internal.theme.value(truncateToWidth(item.currentValue, valueMaxWidth, ''), selected)
+      lines.push(truncateToWidth(prefix + internal.theme.label(labelPadded, selected) + separator + valueText, width))
+    }
+    if (startIndex > 0 || endIndex < displayItems.length) {
+      lines.push(internal.theme.hint(truncateToWidth(`  (${internal.selectedIndex + 1}/${displayItems.length})`, width - 2, '')))
+    }
+    internal.addHintLine(lines, width)
+    return lines
+  }
 }
 
 // Same dialog pattern as the /fabric settings view: a bordered container
@@ -62,7 +118,7 @@ class SearchableSelectDialog extends Container {
     this.addChild(new DynamicBorder(s => theme.fg('border', s)))
     this.addChild(new Text(theme.fg('muted', 'Selecting: ') + theme.fg('accent', title), 1, 0))
     this.addChild(new Spacer(1))
-    this.settingsList = new SettingsList(
+    this.settingsList = new DynamicColumnSettingsList(
       options.map(option => ({
         id: option.value,
         label: option.label,
@@ -72,7 +128,7 @@ class SearchableSelectDialog extends Container {
       10,
       {
         label: (text, selected) => (selected ? theme.fg('accent', text) : text),
-        value: text => theme.fg('dim', text),
+        value: text => theme.fg('muted', text),
         description: text => theme.fg('muted', text),
         cursor: theme.fg('accent', '→ '),
         hint: text => theme.fg('muted', text),
@@ -444,13 +500,12 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   ): Promise<boolean> => {
     const model = draft.models[0]!
     while (true) {
-      const dim = (text: string): string => ctx.ui.theme.fg('dim', text)
+      const muted = (text: string): string => ctx.ui.theme.fg('muted', text)
       const rows: string[] = [
         `Model id: ${model.id}`,
         'Add backing provider model',
         ...model.backends.map((backend, backendIndex) =>
-          `${backendIndex + 1}. `
-          + dim(`${backend.providerId} · ${backend.modelId}`
+          muted(`${backendIndex + 1}. ${backend.providerId} · ${backend.modelId}`
             + ` · ${backend.enabled === false ? 'disabled' : 'enabled'} · w${backend.weight ?? 1}`)),
         'Save and apply',
         'Discard changes',
@@ -511,7 +566,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         model.backends.push({ providerId: chosen.id, modelId: backingModel.id, weight: 1 })
         continue
       }
-      const backendMatch = /^(\d+)\. /.exec(row)
+      const backendMatch = /^(\d+)\. /.exec(row.replace(/\x1b\[[0-9;]*m/g, ''))
       if (backendMatch === null) continue
       const backendNumber = Number(backendMatch[1]!)
       const backend = model.backends[backendNumber - 1]
