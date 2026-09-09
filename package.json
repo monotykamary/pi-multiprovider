@@ -1,6 +1,6 @@
 {
   "name": "pi-multiprovider",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Same-provider multi-account pooling, OAuth storage, and safe in-stream auth failover for Pi",
   "homepage": "https://github.com/monotykamary/pi-multiprovider#readme",
   "repository": {
