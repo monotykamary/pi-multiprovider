@@ -126,7 +126,7 @@ function uniqueProviders(
   return providers.sort((left, right) => left.name.localeCompare(right.name))
 }
 
-export default function multiprovider(pi: ExtensionAPI): void {
+export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   const service = new MultiProviderService()
   const store = new MultiAuthStore()
   const externalIntegrations = new Map<string, AnyIntegration>()
@@ -294,7 +294,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
   // Virtual providers round-robin sessions across backing provider models with
   // no first-provider bias; session affinity pins a session to one backend so
   // prompt caches stay warm between hops.
-  const refreshVirtual = async (ctx: ExtensionContext): Promise<void> => {
+  const refreshVirtual = async (): Promise<void> => {
     const stored = await store.listVirtualProviders()
     const storedIds = new Set(stored.map(config => config.id))
     for (const providerId of [...virtualConfigs.keys()]) {
@@ -313,10 +313,12 @@ export default function multiprovider(pi: ExtensionAPI): void {
       if (prior !== undefined && JSON.stringify(prior) === JSON.stringify(config)) continue
       if (prior !== undefined) unregisterVirtualModels(prior)
 
-      const sessionContext = (): ExtensionContext => currentContext ?? ctx
+      // Registration runs at extension load, before any session exists; the
+      // closures only dereference the context once a session is streaming.
+      const sessionContext = (): ExtensionContext | undefined => currentContext
       const providerLabel = (providerId: string): string | undefined =>
         baseProviders.get(providerId)?.name
-        ?? sessionContext().modelRegistry.getProvider(providerId)?.name
+        ?? sessionContext()?.modelRegistry.getProvider(providerId)?.name
 
       const integrations = createVirtualIntegrations(config, { getProviderLabel: providerLabel })
       for (const integration of integrations) {
@@ -328,15 +330,17 @@ export default function multiprovider(pi: ExtensionAPI): void {
       const virtualProvider = createVirtualProvider({
         service,
         config,
-        getAffinityKey: () => sessionContext().sessionManager.getSessionId(),
+        getAffinityKey: () => sessionContext()?.sessionManager.getSessionId() ?? '',
         getBackingProvider: providerId =>
           installedProviders.get(providerId)
           ?? baseProviders.get(providerId)
-          ?? sessionContext().modelRegistry.getProvider(providerId) as Provider<Api> | undefined,
+          ?? sessionContext()?.modelRegistry.getProvider(providerId) as Provider<Api> | undefined,
         isBackendConfigured: providerId =>
-          sessionContext().modelRegistry.getProviderAuthStatus(providerId).configured,
+          sessionContext()?.modelRegistry.getProviderAuthStatus(providerId).configured ?? true,
         resolveAmbientAuth: async (_providerId, model, signal) => {
-          const resolution = await sessionContext().modelRegistry.getApiKeyAndHeaders(model)
+          const context = sessionContext()
+          if (context === undefined) return { ok: false, error: 'multiprovider: session not ready' }
+          const resolution = await context.modelRegistry.getApiKeyAndHeaders(model)
           if (!resolution.ok) return { ok: false, error: resolution.error }
           return {
             ok: true,
@@ -353,8 +357,15 @@ export default function multiprovider(pi: ExtensionAPI): void {
     }
   }
 
+  // Register stored virtual providers during extension load: pi resolves
+  // model patterns (enabled models, resumed session models) right after
+  // extensions load and before session_start fires, so virtual models must
+  // already be in the registry for session resume to find them.
+  await refreshVirtual()
+
   const reconcile = async (ctx: ExtensionContext): Promise<void> => {
     service.updateSchedulerDefaults(await store.getSchedulerSettings())
+    await refreshVirtual()
     await refreshManaged(ctx)
     const ids = new Set([
       ...externalIntegrations.keys(),
@@ -362,7 +373,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
       ...installedProviders.keys(),
     ])
     for (const providerId of ids) await install(providerId, ctx)
-    await refreshVirtual(ctx)
+    await refreshVirtual()
   }
 
   // Fixed-height, type-to-filter selection dialog modeled on the core /model
