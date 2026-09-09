@@ -14,6 +14,12 @@ export type AuthKind = 'api-key' | 'oauth' | 'service-account' | 'custom'
 export type SelectionPolicy = 'round-robin' | 'weighted-round-robin' | 'least-inflight' | 'priority'
 export type FailureKind = 'rate-limit' | 'quota' | 'auth' | 'transient' | 'fatal'
 
+// How plain round-robin breaks ties when no session pin exists. 'first-account'
+// always starts at the first healthy account in pool order (the "main"
+// account) and only spills over while earlier accounts are unavailable;
+// 'none' rotates evenly across accounts.
+export type SelectionBias = 'first-account' | 'none'
+
 export interface ProviderAttemptFailure {
   message: string
   status?: number
@@ -47,8 +53,9 @@ export interface ProviderRegistration<TCredentialRef = unknown> {
   classifyFailure?: (
     failure: ProviderAttemptFailure,
     account: ProviderAccount<TCredentialRef>,
-  ) => FailureDisposition
+  ) => FailureDisposition | undefined
   managementHint?: string
+  selectionBias?: SelectionBias
 }
 
 export interface AccountPreference {
@@ -117,6 +124,7 @@ export interface PublicPoolSnapshot {
   label: string
   policy: SelectionPolicy
   affinity: boolean
+  firstAccountBias: boolean
   managementHint?: string
   accounts: PublicAccountSnapshot[]
 }
@@ -135,6 +143,30 @@ export interface SchedulerSettings {
 // the stored override under exactOptionalPropertyTypes.
 export type SchedulerSettingsPatch = {
   [K in keyof SchedulerSettings]?: SchedulerSettings[K] | undefined
+}
+
+// One backing (provider, model) pair inside a virtual provider. Virtual
+// backends are scheduler accounts; the credentialRef carries the pair.
+export interface VirtualBackend {
+  providerId: string
+  modelId: string
+  enabled?: boolean
+  weight?: number
+}
+
+export interface VirtualModelConfig {
+  id: string
+  label?: string
+  backends: VirtualBackend[]
+}
+
+// A virtual provider maps one virtual model (or several) to backing provider
+// models so sessions round-robin across providers while keeping per-session
+// cache affinity.
+export interface VirtualProviderConfig {
+  id: string
+  label: string
+  models: VirtualModelConfig[]
 }
 
 export const SCHEDULER_SETTING_KEYS = [

@@ -1,4 +1,4 @@
-import type { Api, AuthType, Credential, Provider } from '@earendil-works/pi-ai'
+import type { Api, AuthType, Context, Credential, Model, Provider } from '@earendil-works/pi-ai'
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -16,9 +16,14 @@ import {
   type MultiAuthUpstreamPreferences,
   type MultiProviderIntegration,
   type MultiProviderServiceContext,
+  type ProviderRegistration,
   type PublicAccountSnapshot,
   type SchedulerSettingsPatch,
   type SelectionPolicy,
+  type VirtualProviderConfig,
+  createVirtualIntegrations,
+  createVirtualProvider,
+  virtualSchedulerId,
 } from '../src/index.ts'
 import { promptApiKeyCredential, probeSessionRuntime, selectLogin, showLoginDialog } from '../src/multilogin.ts'
 import {
@@ -28,6 +33,7 @@ import {
 } from './pool-manager.ts'
 
 type AnyIntegration = MultiProviderIntegration<Api, unknown>
+type VirtualBackendRef = import('../src/index.ts').VirtualBackend
 
 function isIntegration(value: unknown): value is AnyIntegration {
   if (typeof value !== 'object' || value === null) return false
@@ -46,7 +52,11 @@ function errorText(error: unknown): string {
 function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot']>>): string[] {
   const lines: string[] = []
   for (const provider of snapshot.providers) {
-    lines.push(`${provider.label} (${provider.id}) · ${provider.policy} · affinity ${provider.affinity ? 'on' : 'off'}`)
+    lines.push(
+      `${provider.label} (${provider.id}) · ${provider.policy}`
+      + `${provider.firstAccountBias ? ' · main-first' : ''}`
+      + ` · affinity ${provider.affinity ? 'on' : 'off'}`,
+    )
     if (provider.accounts.length === 0) {
       lines.push('  no accounts')
       continue
@@ -64,6 +74,9 @@ function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot
 }
 
 const AUTOMATIC_SWITCH_REFS = new Set(['auto', 'automatic'])
+
+// Ids compose into scheduler ids and backend account ids via '::' separators.
+const VIRTUAL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i
 
 function switchAccountLabel(account: PublicAccountSnapshot, current: boolean): string {
   const kind = account.id === PI_UPSTREAM_ACCOUNT_ID ? 'upstream' : account.authKind
@@ -116,6 +129,9 @@ export default function multiprovider(pi: ExtensionAPI): void {
   const unregisterSchedulers = new Map<string, () => void>()
   const warnedMissing = new Set<string>()
   const warnedOverlap = new Set<string>()
+  const virtualConfigs = new Map<string, VirtualProviderConfig>()
+  const virtualProviders = new Map<string, Provider<Api>>()
+  const virtualIntegrations = new Map<string, ProviderRegistration<VirtualBackendRef>>()
   let currentContext: ExtensionContext | undefined
 
   const effectiveIntegration = (providerId: string): AnyIntegration | undefined => {
@@ -136,18 +152,19 @@ export default function multiprovider(pi: ExtensionAPI): void {
   // keys are invoked with a minimal context, so keys derived from request
   // message history cannot be reproduced here and fall back to the session id.
   const sessionAffinityKey = (
-    integration: AnyIntegration,
+    integration: AnyIntegration | ProviderRegistration<VirtualBackendRef>,
     ctx: MultiProviderServiceContext,
     model: ExtensionContext['model'],
     providerId: string,
   ): string => {
     const fallback = ctx.sessionManager.getSessionId()
-    if (integration.affinityKey === undefined || model === undefined) return fallback
+    const customAffinityKey = (integration as Partial<AnyIntegration>).affinityKey
+    if (customAffinityKey === undefined || model === undefined) return fallback
     const provider = baseProviders.get(providerId)
       ?? ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
     if (provider === undefined) return fallback
     try {
-      return integration.affinityKey({ provider, model, context: { messages: [] } }) ?? fallback
+      return customAffinityKey({ provider, model, context: { messages: [] } }) ?? fallback
     } catch {
       return fallback
     }
@@ -256,6 +273,77 @@ export default function multiprovider(pi: ExtensionAPI): void {
     }
   }
 
+  const unregisterVirtualModels = (config: VirtualProviderConfig): void => {
+    for (const model of config.models) {
+      const schedulerId = virtualSchedulerId(config.id, model.id)
+      unregisterSchedulers.get(schedulerId)?.()
+      unregisterSchedulers.delete(schedulerId)
+      virtualIntegrations.delete(schedulerId)
+    }
+  }
+
+  // Virtual providers round-robin sessions across backing provider models with
+  // no first-provider bias; session affinity pins a session to one backend so
+  // prompt caches stay warm between hops.
+  const refreshVirtual = async (ctx: ExtensionContext): Promise<void> => {
+    const stored = await store.listVirtualProviders()
+    const storedIds = new Set(stored.map(config => config.id))
+    for (const providerId of [...virtualConfigs.keys()]) {
+      if (storedIds.has(providerId)) continue
+      const prior = virtualConfigs.get(providerId)
+      if (prior !== undefined) unregisterVirtualModels(prior)
+      virtualConfigs.delete(providerId)
+      if (virtualProviders.has(providerId)) {
+        pi.unregisterProvider(providerId)
+        virtualProviders.delete(providerId)
+      }
+    }
+
+    for (const config of stored) {
+      const prior = virtualConfigs.get(config.id)
+      if (prior !== undefined && JSON.stringify(prior) === JSON.stringify(config)) continue
+      if (prior !== undefined) unregisterVirtualModels(prior)
+
+      const sessionContext = (): ExtensionContext => currentContext ?? ctx
+      const providerLabel = (providerId: string): string | undefined =>
+        baseProviders.get(providerId)?.name
+        ?? sessionContext().modelRegistry.getProvider(providerId)?.name
+
+      const integrations = createVirtualIntegrations(config, { getProviderLabel: providerLabel })
+      for (const integration of integrations) {
+        unregisterSchedulers.get(integration.id)?.()
+        unregisterSchedulers.set(integration.id, service.registerProvider(integration))
+        virtualIntegrations.set(integration.id, integration)
+      }
+
+      const virtualProvider = createVirtualProvider({
+        service,
+        config,
+        getAffinityKey: () => sessionContext().sessionManager.getSessionId(),
+        getBackingProvider: providerId =>
+          installedProviders.get(providerId)
+          ?? baseProviders.get(providerId)
+          ?? sessionContext().modelRegistry.getProvider(providerId) as Provider<Api> | undefined,
+        isBackendConfigured: providerId =>
+          sessionContext().modelRegistry.getProviderAuthStatus(providerId).configured,
+        resolveAmbientAuth: async (_providerId, model, signal) => {
+          const resolution = await sessionContext().modelRegistry.getApiKeyAndHeaders(model)
+          if (!resolution.ok) return { ok: false, error: resolution.error }
+          return {
+            ok: true,
+            ...(resolution.apiKey === undefined ? {} : { apiKey: resolution.apiKey }),
+            ...(resolution.headers === undefined ? {} : { headers: resolution.headers }),
+            ...(resolution.baseUrl === undefined ? {} : { baseUrl: resolution.baseUrl }),
+            ...(resolution.env === undefined ? {} : { env: resolution.env }),
+          }
+        },
+      })
+      pi.registerProvider(virtualProvider)
+      virtualProviders.set(config.id, virtualProvider)
+      virtualConfigs.set(config.id, config)
+    }
+  }
+
   const reconcile = async (ctx: ExtensionContext): Promise<void> => {
     service.updateSchedulerDefaults(await store.getSchedulerSettings())
     await refreshManaged(ctx)
@@ -265,6 +353,104 @@ export default function multiprovider(pi: ExtensionAPI): void {
       ...installedProviders.keys(),
     ])
     for (const providerId of ids) await install(providerId, ctx)
+    await refreshVirtual(ctx)
+  }
+
+  // Interactive editor for a virtual provider draft. The UI manages one
+  // virtual model per provider; extra models (created programmatically) are
+  // preserved untouched through saves.
+  const editVirtualProvider = async (
+    ctx: ExtensionContext,
+    draft: VirtualProviderConfig,
+  ): Promise<boolean> => {
+    const model = draft.models[0]!
+    while (true) {
+      const rows: string[] = [
+        `Model id: ${model.id}`,
+        `Model label: ${model.label ?? model.id}`,
+        'Add backing provider model',
+        ...model.backends.map((backend, backendIndex) =>
+          `${backendIndex + 1}. ${backend.providerId} · ${backend.modelId}`
+          + ` · ${backend.enabled === false ? 'disabled' : 'enabled'} · w${backend.weight ?? 1}`),
+        'Save and apply',
+        'Discard changes',
+      ]
+      const selected = await ctx.ui.select(`Virtual provider "${draft.id}" (${draft.label}):`, rows)
+      const rowIndex = rows.indexOf(selected ?? '')
+      if (rowIndex < 0) return false
+      const row = rows[rowIndex]!
+
+      if (row === 'Discard changes') return false
+      if (row === 'Save and apply') {
+        if (model.backends.filter(backend => backend.enabled !== false).length === 0) {
+          ctx.ui.notify('Add at least one enabled backing provider model first.', 'error')
+          continue
+        }
+        await store.saveVirtualProvider(draft)
+        await reconcile(ctx)
+        return true
+      }
+      if (row.startsWith('Model id: ')) {
+        const next = await ctx.ui.input('Virtual model id (shown in /model):', model.id)
+        if (next !== undefined && next.trim() !== '') {
+          const id = next.trim()
+          if (!VIRTUAL_ID_PATTERN.test(id)) {
+            ctx.ui.notify('Use letters, numbers, dots, dashes, or underscores.', 'error')
+          } else {
+            model.id = id
+          }
+        }
+        continue
+      }
+      if (row.startsWith('Model label: ')) {
+        const next = await ctx.ui.input('Display name for /model:', model.label ?? model.id)
+        if (next !== undefined && next.trim() !== '') model.label = next.trim()
+        continue
+      }
+      if (row === 'Add backing provider model') {
+        const candidates = uniqueProviders(ctx, baseProviders)
+          .filter(provider => !virtualProviders.has(provider.id) && provider.getModels().length > 0)
+        if (candidates.length === 0) {
+          ctx.ui.notify('No registered providers expose models yet.', 'warning')
+          continue
+        }
+        const providerLabels = candidates.map(candidate => `${candidate.name} (${candidate.id})`)
+        const providerIndex = providerLabels.indexOf(await ctx.ui.select('Backing provider:', providerLabels) ?? '')
+        if (providerIndex < 0) continue
+        const chosen = candidates[providerIndex]!
+        const catalog = chosen.getModels()
+        const modelLabels = catalog.map(candidate => `${candidate.id} · ${candidate.name}`)
+        const modelIndex = modelLabels.indexOf(await ctx.ui.select(`Backing model for ${chosen.name}:`, modelLabels) ?? '')
+        if (modelIndex < 0) continue
+        const backingModel = catalog[modelIndex]!
+        if (model.backends.some(backend =>
+          backend.providerId === chosen.id && backend.modelId === backingModel.id)) {
+          ctx.ui.notify('That provider model is already a backend.', 'warning')
+          continue
+        }
+        model.backends.push({ providerId: chosen.id, modelId: backingModel.id, weight: 1 })
+        continue
+      }
+      const backendMatch = /^(\d+)\. /.exec(row)
+      if (backendMatch === null) continue
+      const backendNumber = Number(backendMatch[1]!)
+      const backend = model.backends[backendNumber - 1]
+      if (backend === undefined) continue
+      const actions = [backend.enabled === false ? 'Enable' : 'Disable', 'Set weight', 'Remove']
+      const actionIndex = actions.indexOf(await ctx.ui.select(`${backend.providerId} · ${backend.modelId}:`, actions) ?? '')
+      if (actionIndex < 0) continue
+      if (actionIndex === 0) {
+        backend.enabled = backend.enabled === false
+      } else if (actionIndex === 1) {
+        const next = await ctx.ui.input('Weight (1 = equal share):', String(backend.weight ?? 1))
+        if (next === undefined) continue
+        const parsed = Number(next)
+        if (Number.isInteger(parsed) && parsed >= 1) backend.weight = parsed
+        else ctx.ui.notify('Weight must be an integer ≥ 1.', 'error')
+      } else {
+        model.backends.splice(backendNumber - 1, 1)
+      }
+    }
   }
 
   const unsubscribeRegistration = pi.events.on(MULTIPROVIDER_REGISTER_EVENT, value => {
@@ -291,6 +477,10 @@ export default function multiprovider(pi: ExtensionAPI): void {
     for (const providerId of installedProviders.keys()) restoreProvider(providerId, currentContext)
     managedIntegrations.clear()
     managedBases.clear()
+    for (const providerId of virtualProviders.keys()) pi.unregisterProvider(providerId)
+    virtualProviders.clear()
+    virtualIntegrations.clear()
+    virtualConfigs.clear()
     currentContext = undefined
   })
 
@@ -303,6 +493,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
       }
       await reconcile(ctx)
       const providers = uniqueProviders(ctx, baseProviders)
+        .filter(provider => !virtualProviders.has(provider.id))
       const selection = await selectLogin(ctx, providers, args.trim() || undefined)
       if (selection === undefined) return
       const provider = selection.provider
@@ -522,11 +713,15 @@ export default function multiprovider(pi: ExtensionAPI): void {
         return
       }
       const providerId = model.provider
-      const providerName = ctx.modelRegistry.getProvider(providerId)?.name ?? providerId
-      const integration = effectiveIntegration(providerId)
+      const virtual = virtualIntegrations.get(virtualSchedulerId(providerId, model.id))
+      const integration = virtual ?? effectiveIntegration(providerId)
+      const poolId = virtual !== undefined ? virtual.id : providerId
+      const providerName = virtual !== undefined
+        ? `${virtualProviders.get(providerId)?.name ?? providerId} · ${model.name}`
+        : ctx.modelRegistry.getProvider(providerId)?.name ?? providerId
       const pool = integration === undefined
         ? undefined
-        : (await service.snapshot()).providers.find(candidate => candidate.id === providerId)
+        : (await service.snapshot()).providers.find(candidate => candidate.id === poolId)
       const accounts = pool?.accounts ?? []
       if (integration === undefined || pool === undefined || accounts.length === 0) {
         ctx.ui.notify(`${providerName} has no pooled accounts. Use /multilogin to add one.`, 'info')
@@ -544,7 +739,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
       }
 
       const affinityKey = sessionAffinityKey(integration, ctx, model, providerId)
-      const pin = service.getAffinity(providerId, affinityKey)
+      const pin = service.getAffinity(poolId, affinityKey)
       const currentId = pin !== undefined && (pool.affinity || pin.explicit)
         ? pin.accountId
         : undefined
@@ -552,8 +747,8 @@ export default function multiprovider(pi: ExtensionAPI): void {
       // Sibling extensions following the active account (usage widgets and the
       // like) re-resolve their account-scoped state from this notification.
       const announceSwitch = async (): Promise<void> => {
-        const account = await announcement.getActiveAccount(providerId, ctx)
-        announcement.notifyActiveAccountChanged(providerId, ctx, account)
+        const account = await announcement.getActiveAccount(poolId, ctx)
+        announcement.notifyActiveAccountChanged(poolId, ctx, account)
       }
 
       const ref = args.trim()
@@ -587,7 +782,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
       }
 
       if (automatic) {
-        service.clearAffinity(providerId, affinityKey)
+        service.clearAffinity(poolId, affinityKey)
         await announceSwitch()
         ctx.ui.notify(
           pool.affinity
@@ -605,7 +800,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
         return
       }
       try {
-        await service.pinAccount(providerId, affinityKey, account.id)
+        await service.pinAccount(poolId, affinityKey, account.id)
       } catch (error) {
         ctx.ui.notify(`Could not switch account: ${errorText(error)}`, 'error')
         return
@@ -618,6 +813,90 @@ export default function multiprovider(pi: ExtensionAPI): void {
         `Switched to ${account.label} for this session. Pool settings are unchanged; new requests from this session use it.${cooldown}`,
         'info',
       )
+    },
+  })
+
+  pi.registerCommand('vprovider', {
+    description: 'Create virtual providers that map one model across multiple provider models',
+    handler: async (args, ctx) => {
+      if (!ctx.hasUI || ctx.mode !== 'tui') {
+        ctx.ui.notify('/vprovider requires Pi interactive mode.', 'warning')
+        return
+      }
+      await reconcile(ctx)
+      const stored = await store.listVirtualProviders()
+      const ref = args.trim().toLowerCase()
+      if (ref !== '') {
+        const existing = stored.find(candidate => candidate.id.toLowerCase() === ref)
+        if (existing !== undefined) {
+          const draft = structuredClone(existing)
+          if (await editVirtualProvider(ctx, draft)) {
+            ctx.ui.notify(`Saved virtual provider "${draft.id}". Select "${draft.models[0]!.id}" on provider "${draft.id}" in /model.`, 'info')
+          }
+          return
+        }
+      }
+
+      const rows = [
+        'Create new virtual provider',
+        ...stored.map(candidate => `Edit ${candidate.label} (${candidate.id})`),
+        ...stored.map(candidate => `Delete ${candidate.label} (${candidate.id})`),
+      ]
+      const selected = await ctx.ui.select('Virtual providers:', rows)
+      const index = rows.indexOf(selected ?? '')
+      if (index < 0) return
+      const row = rows[index]!
+
+      if (row === 'Create new virtual provider') {
+        const idInput = await ctx.ui.input('Virtual provider id:', 'pooled')
+        if (idInput === undefined) return
+        const id = idInput.trim()
+        if (!VIRTUAL_ID_PATTERN.test(id) || virtualProviders.has(id)
+          || ctx.modelRegistry.getProvider(id) !== undefined) {
+          ctx.ui.notify('Provider id is invalid or already registered.', 'error')
+          return
+        }
+        const labelInput = await ctx.ui.input('Display name:', id)
+        if (labelInput === undefined) return
+        const label = labelInput.trim() || id
+        const modelIdInput = await ctx.ui.input('Virtual model id (shown in /model):', id)
+        if (modelIdInput === undefined) return
+        const modelId = modelIdInput.trim()
+        if (!VIRTUAL_ID_PATTERN.test(modelId)) {
+          ctx.ui.notify('Use letters, numbers, dots, dashes, or underscores for the model id.', 'error')
+          return
+        }
+        const draft: VirtualProviderConfig = {
+          id,
+          label,
+          models: [{ id: modelId, backends: [] }],
+        }
+        ctx.ui.notify('Add at least one backing provider model, then choose "Save and apply".', 'info')
+        if (await editVirtualProvider(ctx, draft)) {
+          ctx.ui.notify(`Created virtual provider "${id}". Select "${draft.models[0]!.id}" on provider "${id}" in /model.`, 'info')
+        }
+        return
+      }
+
+      const target = stored.find(candidate => row.endsWith(`(${candidate.id})`))
+      if (target === undefined) return
+      if (row.startsWith('Edit ')) {
+        const draft = structuredClone(target)
+        if (await editVirtualProvider(ctx, draft)) {
+          ctx.ui.notify(`Saved virtual provider "${draft.id}". Select "${draft.models[0]!.id}" on provider "${draft.id}" in /model.`, 'info')
+        }
+        return
+      }
+      if (row.startsWith('Delete ')) {
+        const confirmed = await ctx.ui.confirm(
+          'Remove virtual provider?',
+          `Remove ${target.label} (${target.id})? Backing providers and their pooled accounts are untouched.`,
+        )
+        if (!confirmed) return
+        await store.removeVirtualProvider(target.id)
+        await reconcile(ctx)
+        ctx.ui.notify(`Removed virtual provider "${target.id}".`, 'info')
+      }
     },
   })
 }

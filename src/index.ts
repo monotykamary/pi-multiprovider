@@ -3,6 +3,17 @@ export * from './errors.ts'
 export * from './service.ts'
 export { liftProvider } from './lift.ts'
 export {
+  BACKEND_UNAVAILABLE_PREFIX,
+  VIRTUAL_ID_SEPARATOR,
+  createVirtualIntegrations,
+  createVirtualProvider,
+  virtualBackendAccountId,
+  virtualSchedulerId,
+  type AmbientAuthResolution,
+  type VirtualIntegrationOptions,
+  type VirtualProviderDependencies,
+} from './virtual.ts'
+export {
   createServiceAnnouncement,
   type AnnouncementDependencies,
   type ServiceAnnouncementHandle,

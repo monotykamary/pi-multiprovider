@@ -101,6 +101,7 @@ Add as many accounts as you need from the same manager. Remove credentials from 
 | --- | --- |
 | `/multilogin [provider]` | Open the pool manager: strategy, affinity, upstream, account, and scheduler settings, plus adding or removing accounts. |
 | `/multilogout [provider]` | Remove an account saved by `/multilogin`. |
+| `/vprovider [id]` | Create and edit virtual providers that map one model across multiple provider models. |
 | `/accounts` | Inspect pool policy, account status, in-flight leases, failures, and cooldowns. |
 | `/switch-account [label]` | Pin this session to one pooled account of the current model's provider, or return to automatic selection. |
 
@@ -108,12 +109,32 @@ Add as many accounts as you need from the same manager. Remove credentials from 
 
 | Strategy | Selection behavior | Good for |
 | --- | --- | --- |
-| **Round robin** | Rotates through healthy account IDs. | Even distribution across similar accounts. |
+| **Round robin** | Starts at the first healthy account in pool order (the **main account**) and spills over to later accounts only while earlier ones are unavailable. | A primary subscription with backup accounts. |
 | **Weighted round robin** | Uses smooth weighted scheduling. | Accounts with different quotas or spend limits. |
 | **Least in flight** | Selects the healthy account with the least active work. | Concurrent agents and uneven request duration. |
 | **Priority failover** | Uses the lowest-priority number until it becomes unhealthy. | Primary/backup credentials. |
 
+First-account bias keeps every new session on the account listed first in the pool—**Pi default (upstream)** when included, otherwise the first stored account—so you stop seeing sessions start on a backup account while the main one has plenty of usage. Integrations that want even request rotation register with `selectionBias: 'none'`, which restores the classic rotate-through-healthy-accounts behavior.
+
 Session affinity can pin a healthy account to the current Pi session. Explicit retry exclusions always win, so a rejected account is not selected twice for the same logical request. Switch strategies, affinity, and per-account weight and priority at any time inside `/multilogin`. `/switch-account` sets the pinned account explicitly for one session without touching these settings.
+
+## Virtual providers
+
+A virtual provider maps **one model to multiple provider models**. Sessions are spread across the backing providers with unbiased round robin—no first-provider favoritism—while session affinity pins each session to one backend, so prompt caches stay warm between requests and every subscription sees roughly its share of sessions.
+
+Create one with `/vprovider`:
+
+1. Choose **Create new virtual provider**, then set the provider id, display name, and virtual model id.
+2. Add one or more **backing provider models**—pick any registered provider and one of its models. Toggle, reweight, or remove backends at any time.
+3. **Save and apply**. The virtual model appears in `/model` under the virtual provider's id.
+
+Behavior details:
+
+- Each request resolves auth at the backing provider layer: the provider's own ambient credential (Pi `/login`, auth.json, environment) or, when the backing provider has a multiprovider pool, its pooled accounts with their own failover.
+- A failing backend fails over to the next one before any output streams; the failed backend cools down under the same scheduler policies as account pools.
+- `/switch-account` works on virtual models too: pin the session to one backing provider model, or return to automatic rotation.
+- Virtual provider configs are stored (credential-free) in `multiprovider-auth.json` next to the account pools.
+- Mixing backends from different model families is allowed, but the virtual model advertises the first healthy backend's context window and pricing, and prompt caches never transfer between providers.
 
 ## Switching accounts for one session
 

@@ -167,12 +167,15 @@ describe('managed account integration', () => {
     if (poolOnly === undefined) throw new Error('pool-only test model missing')
     await poolOnlyModels.completeSimple(poolOnly, { messages: [] })
 
+    // First-account bias serves the upstream (Pi default) credential first;
+    // the pool-only request excludes it and spills to the stored account.
     expect(attempts).toEqual([
       {
-        apiKey: 'extra-key',
-        baseUrl: 'https://base.invalid',
-        extraHeader: 'extra',
-        extraEnv: 'extra',
+        apiKey: 'upstream-key',
+        baseUrl: 'https://upstream.invalid',
+        authorization: 'Bearer upstream-key',
+        upstreamHeader: 'upstream',
+        upstreamEnv: 'upstream',
       },
       {
         apiKey: 'upstream-key',

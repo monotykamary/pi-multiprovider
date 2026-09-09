@@ -27,7 +27,11 @@ interface ResolveResult {
   source?: string
 }
 
-function makeHarness(options: { affinity?: boolean; resolve?: ResolveResult | Error } = {}) {
+function makeHarness(options: {
+  affinity?: boolean
+  selectionBias?: 'first-account' | 'none'
+  resolve?: ResolveResult | Error
+} = {}) {
   const resolve: ResolveResult | Error = options.resolve
     ?? { auth: { apiKey: 'token-a' }, source: 'Work · Test OAuth' }
   const integration: MultiProviderIntegration<Api, unknown> = {
@@ -43,7 +47,12 @@ function makeHarness(options: { affinity?: boolean; resolve?: ResolveResult | Er
     ...(options.affinity === undefined ? {} : { affinity: options.affinity }),
     randomId: () => 'lease-1',
   })
-  scheduler.registerProvider({ id: 'example', label: 'Example', accounts: () => accounts })
+  scheduler.registerProvider({
+    id: 'example',
+    label: 'Example',
+    accounts: () => accounts,
+    ...(options.selectionBias === undefined ? {} : { selectionBias: options.selectionBias }),
+  })
   const model = { id: 'model', provider: 'example' } as unknown as Model<Api>
   const provider = {
     id: 'example',
@@ -82,7 +91,7 @@ describe('service announcement', () => {
   })
 
   it('reports the last scheduler selection while affinity is on', async () => {
-    const { scheduler, announcement, ctx } = makeHarness({})
+    const { scheduler, announcement, ctx } = makeHarness({ selectionBias: 'none' })
     const lease = await scheduler.acquire({ providerId: 'example', affinityKey: 'session-1' })
     lease.release({ status: 'success' })
     expect(await announcement.getActiveAccount('example', ctx)).toEqual({

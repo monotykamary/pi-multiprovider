@@ -34,6 +34,18 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })))
 })
 
+const virtualConfig = {
+  id: 'pooled',
+  label: 'Pooled',
+  models: [{
+    id: 'ultra',
+    backends: [
+      { providerId: 'prov-a', modelId: 'model-a', weight: 2 },
+      { providerId: 'prov-b', modelId: 'model-b', weight: 1 },
+    ],
+  }],
+}
+
 describe('MultiAuthStore', () => {
   it('persists atomically with mode 0600 and never exposes credential values in public views', async () => {
     const { store } = await storeFixture()
@@ -217,5 +229,58 @@ describe('MultiAuthStore upstream preferences and scheduler settings', () => {
     const text = await readFile(join(directory, 'multiprovider-auth.json'), 'utf8')
     expect(JSON.parse(text)).toEqual({ version: 1, providers: {} })
     await expect(store.updateSchedulerSettings({ rateLimitCooldownMs: -1 })).rejects.toThrow('non-negative')
+  })
+})
+
+describe('MultiAuthStore virtual providers', () => {
+  it('round-trips, updates, lists, and removes virtual providers', async () => {
+    const { directory, store } = await storeFixture()
+    await store.saveVirtualProvider(virtualConfig)
+    expect(await store.listVirtualProviders()).toEqual([virtualConfig])
+    const persisted = JSON.parse(await readFile(join(directory, 'multiprovider-auth.json'), 'utf8'))
+    expect(persisted.virtuals.pooled.models[0].backends[0].weight).toBe(2)
+
+    await store.saveVirtualProvider({
+      ...virtualConfig,
+      models: [{ id: 'ultra', backends: [{ providerId: 'prov-a', modelId: 'model-a' }] }],
+    })
+    const updated = await store.getVirtualProvider('pooled')
+    expect(updated?.models[0]?.backends).toEqual([{ providerId: 'prov-a', modelId: 'model-a', weight: 1 }])
+
+    expect(await store.removeVirtualProvider('pooled')).toBe(true)
+    expect(await store.listVirtualProviders()).toEqual([])
+    expect(await store.removeVirtualProvider('pooled')).toBe(false)
+  })
+
+  it('rejects malformed virtual provider configs on save and load', async () => {
+    const { store } = await storeFixture()
+    await expect(store.saveVirtualProvider({ ...virtualConfig, id: '' })).rejects.toThrow('virtual provider id')
+    await expect(store.saveVirtualProvider({ ...virtualConfig, id: 'bad::id' })).rejects.toThrow('virtual provider id')
+    await expect(store.saveVirtualProvider({
+      ...virtualConfig,
+      models: [{ id: 'ultra', backends: [] }],
+    })).rejects.toThrow('backends')
+    await expect(store.saveVirtualProvider({
+      ...virtualConfig,
+      models: [{
+        id: 'ultra',
+        backends: [
+          { providerId: 'prov-a', modelId: 'model-a' },
+          { providerId: 'prov-a', modelId: 'model-a' },
+        ],
+      }],
+    })).rejects.toThrow('duplicate backend')
+    await expect(store.saveVirtualProvider({
+      ...virtualConfig,
+      models: [{ id: 'ultra', backends: [{ providerId: 'prov-a', modelId: 'model::a' }] }],
+    })).rejects.toThrow('backend model id')
+    const { directory } = await storeFixture()
+    const path = join(directory, 'multiprovider-auth.json')
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      providers: {},
+      virtuals: { pooled: { id: 'pooled', label: 'Pooled', models: 'nope' } },
+    }))
+    await expect(new MultiAuthStore(path).listVirtualProviders()).rejects.toThrow('malformed models')
   })
 })

@@ -12,7 +12,15 @@ import type {
 } from '@earendil-works/pi-ai'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
 import { SCHEDULER_SETTING_KEYS } from './types.ts'
-import type { AuthKind, SchedulerSettings, SchedulerSettingsPatch, SelectionPolicy } from './types.ts'
+import type {
+  AuthKind,
+  SchedulerSettings,
+  SchedulerSettingsPatch,
+  SelectionPolicy,
+  VirtualBackend,
+  VirtualModelConfig,
+  VirtualProviderConfig,
+} from './types.ts'
 
 export const MULTIPROVIDER_AUTH_FILE = 'multiprovider-auth.json'
 
@@ -81,6 +89,7 @@ interface PersistedState {
   version: 1
   scheduler?: SchedulerSettings
   providers: Record<string, PersistedPool>
+  virtuals?: Record<string, VirtualProviderConfig>
 }
 
 const DEFAULT_POLICY: SelectionPolicy = 'round-robin'
@@ -136,6 +145,68 @@ function assertSchedulerSettings(value: unknown): asserts value is SchedulerSett
   }
 }
 
+const VIRTUAL_ID_SEPARATOR = '::'
+
+function assertVirtualId(value: unknown, label: string): asserts value is string {
+  if (typeof value !== 'string' || value.trim() === '' || value.includes(VIRTUAL_ID_SEPARATOR)) {
+    throw new Error(`multiprovider: malformed virtual ${label}`)
+  }
+  assertSafeKey(value, `virtual ${label}`)
+}
+
+function normalizeVirtualProvider(value: unknown): VirtualProviderConfig {
+  if (typeof value !== 'object' || value === null) {
+    throw new Error('multiprovider: malformed virtual provider')
+  }
+  const candidate = value as Partial<VirtualProviderConfig>
+  assertVirtualId(candidate.id, 'provider id')
+  if (typeof candidate.label !== 'string' || candidate.label.trim() === '') {
+    throw new Error(`multiprovider: malformed label for virtual provider "${candidate.id}"`)
+  }
+  if (!Array.isArray(candidate.models) || candidate.models.length === 0) {
+    throw new Error(`multiprovider: malformed models for virtual provider "${candidate.id}"`)
+  }
+  const models = candidate.models.map(modelValue => {
+    if (typeof modelValue !== 'object' || modelValue === null) {
+      throw new Error(`multiprovider: malformed model for virtual provider "${candidate.id}"`)
+    }
+    const model = modelValue as Partial<VirtualModelConfig>
+    assertVirtualId(model.id, 'model id')
+    if (!Array.isArray(model.backends) || model.backends.length === 0) {
+      throw new Error(`multiprovider: malformed backends for virtual model "${model.id}"`)
+    }
+    const seen = new Set<string>()
+    const backends = model.backends.map(backendValue => {
+      if (typeof backendValue !== 'object' || backendValue === null) {
+        throw new Error(`multiprovider: malformed backend for virtual model "${model.id}"`)
+      }
+      const backend = backendValue as Partial<VirtualBackend>
+      assertVirtualId(backend.providerId, 'backend provider id')
+      assertVirtualId(backend.modelId, 'backend model id')
+      if (backend.enabled !== undefined && typeof backend.enabled !== 'boolean') {
+        throw new Error(`multiprovider: malformed backend enabled for virtual model "${model.id}"`)
+      }
+      const key = backend.providerId + VIRTUAL_ID_SEPARATOR + backend.modelId
+      if (seen.has(key)) {
+        throw new Error(`multiprovider: duplicate backend "${key}" for virtual model "${model.id}"`)
+      }
+      seen.add(key)
+      return {
+        providerId: backend.providerId,
+        modelId: backend.modelId,
+        ...(backend.enabled === undefined ? {} : { enabled: backend.enabled }),
+        weight: normalizeWeight(backend.weight),
+      }
+    })
+    return {
+      id: model.id,
+      ...(model.label === undefined || model.label.trim() === '' ? {} : { label: model.label.trim() }),
+      backends,
+    }
+  })
+  return { id: candidate.id, label: candidate.label.trim(), models }
+}
+
 function parseState(text: string): PersistedState {
   const value: unknown = JSON.parse(text)
   if (typeof value !== 'object' || value === null) {
@@ -166,6 +237,11 @@ function parseState(text: string): PersistedState {
       }
       assertSafeKey(account.id, 'account id')
       assertCredential(account.credential)
+    }
+  }
+  if (candidate.virtuals !== undefined) {
+    for (const virtualValue of Object.values(candidate.virtuals)) {
+      normalizeVirtualProvider(virtualValue)
     }
   }
   return candidate as PersistedState
@@ -394,6 +470,39 @@ export class MultiAuthStore {
       if (Object.keys(next).length === 0) delete state.scheduler
       else state.scheduler = { ...next } as SchedulerSettings
       return { ...next } as SchedulerSettings
+    })
+  }
+
+  async listVirtualProviders(): Promise<VirtualProviderConfig[]> {
+    const state = await this.readState()
+    return Object.values(state.virtuals ?? {})
+      .map(provider => structuredClone(provider))
+      .sort((left, right) => left.id.localeCompare(right.id))
+  }
+
+  async getVirtualProvider(id: string): Promise<VirtualProviderConfig | undefined> {
+    assertSafeKey(id, 'virtual provider id')
+    const state = await this.readState()
+    const provider = state.virtuals?.[id]
+    return provider === undefined ? undefined : structuredClone(provider)
+  }
+
+  async saveVirtualProvider(input: VirtualProviderConfig): Promise<VirtualProviderConfig> {
+    const provider = normalizeVirtualProvider(input)
+    return this.mutate(state => {
+      state.virtuals ??= {}
+      state.virtuals[provider.id] = structuredClone(provider)
+      return structuredClone(provider)
+    })
+  }
+
+  async removeVirtualProvider(id: string): Promise<boolean> {
+    assertSafeKey(id, 'virtual provider id')
+    return this.mutate(state => {
+      if (state.virtuals?.[id] === undefined) return false
+      delete state.virtuals[id]
+      if (Object.keys(state.virtuals).length === 0) delete state.virtuals
+      return true
     })
   }
 

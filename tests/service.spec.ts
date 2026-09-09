@@ -39,18 +39,62 @@ function failure(status: number): ProviderAttemptFailure {
 }
 
 describe('MultiProviderService', () => {
-  it('round robins stable account ids without exposing credential references', async () => {
+  it('keeps unpinned selection on the main account and never exposes credential references', async () => {
     const service = scheduler()
     expect(await select(service)).toBe('a')
+    // First-account bias: unpinned picks stay on the first healthy account.
+    expect(await select(service)).toBe('a')
     const lease = await service.acquire<string>({ providerId: 'example' })
-    expect(lease.accountId).toBe('b')
-    expect(lease.credentialRef).toBe('secret-personal')
+    expect(lease.accountId).toBe('a')
+    expect(lease.credentialRef).toBe('secret-work')
     lease.release()
 
     const snapshot = await service.snapshot()
+    expect(snapshot.providers[0]?.firstAccountBias).toBe(true)
     expect(snapshot.providers[0]?.accounts).toHaveLength(2)
     expect(JSON.stringify(snapshot)).not.toContain('secret-work')
     expect(JSON.stringify(snapshot)).not.toContain('secret-personal')
+  })
+
+  it('spills unpinned selection over in pool order and follows pool order over id order', async () => {
+    const service = scheduler()
+    expect(await select(service, { excludeAccountIds: ['a'] })).toBe('b')
+    const reversed = new MultiProviderService()
+    reversed.registerProvider({
+      id: 'example',
+      label: 'Example',
+      accounts: () => [...accounts].reverse(),
+    })
+    expect(await select(reversed)).toBe('b')
+  })
+
+  it('rotates evenly for providers registered without first-account bias', async () => {
+    const service = new MultiProviderService({
+      randomId: (() => {
+        let id = 0
+        return () => `lease-${++id}`
+      })(),
+    })
+    service.registerProvider({
+      id: 'example',
+      label: 'Example',
+      selectionBias: 'none',
+      accounts: () => accounts,
+    })
+    expect(await select(service)).toBe('a')
+    expect(await select(service)).toBe('b')
+    expect(await select(service)).toBe('a')
+  })
+
+  it('spills new sessions to the next account while the main account cools down', async () => {
+    let now = 1_000
+    const service = scheduler({ now: () => now, affinity: false })
+    const lease = await service.acquire({ providerId: 'example' })
+    expect(lease.accountId).toBe('a')
+    lease.release({ status: 'failure', error: failure(429) })
+    expect(await select(service)).toBe('b')
+    now = 61_000
+    expect(await select(service)).toBe('a')
   })
 
   it('pins affinity while available and honors explicit attempt exclusions', async () => {

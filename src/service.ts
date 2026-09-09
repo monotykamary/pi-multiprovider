@@ -18,6 +18,7 @@ import type {
   SchedulerSettings,
   PublicPoolSnapshot,
   SchedulerOptions,
+  SelectionBias,
   SelectionPolicy,
 } from './types.ts'
 
@@ -36,6 +37,11 @@ interface EffectiveAccount {
   priority: number
   runtime: RuntimeState
 }
+
+// Plain round-robin prefers the first healthy account in pool order by
+// default so new sessions start on the operator's main account; register a
+// provider with selectionBias 'none' for even rotation instead.
+const DEFAULT_SELECTION_BIAS: SelectionBias = 'first-account'
 
 const DEFAULTS = {
   defaultPolicy: 'round-robin' as SelectionPolicy,
@@ -89,6 +95,7 @@ export class MultiProviderService {
   private readonly providers = new Map<string, ProviderRegistration>()
   private readonly preferences = new Map<string, PoolPreference>()
   private readonly runtime = new Map<string, RuntimeState>()
+  private readonly selectionBias = new Map<string, SelectionBias>()
   private readonly affinity = new Map<string, Map<string, string>>()
   private readonly explicitAffinity = new Map<string, Set<string>>()
   private readonly roundRobinCursor = new Map<string, number>()
@@ -117,9 +124,11 @@ export class MultiProviderService {
       throw new Error(`multiprovider: duplicate provider "${registration.id}"`)
     }
     this.providers.set(registration.id, registration as ProviderRegistration)
+    this.selectionBias.set(registration.id, registration.selectionBias ?? DEFAULT_SELECTION_BIAS)
     return () => {
       if (this.providers.get(registration.id) !== registration) return
       this.providers.delete(registration.id)
+      this.selectionBias.delete(registration.id)
       this.affinity.delete(registration.id)
       this.explicitAffinity.delete(registration.id)
       this.roundRobinCursor.delete(registration.id)
@@ -242,6 +251,7 @@ export class MultiProviderService {
         label: registration.label,
         policy: pool.policy,
         affinity: pool.affinity,
+        firstAccountBias: (this.selectionBias.get(registration.id) ?? DEFAULT_SELECTION_BIAS) === 'first-account',
         ...(registration.managementHint === undefined
           ? {}
           : { managementHint: registration.managementHint }),
@@ -422,6 +432,12 @@ export class MultiProviderService {
     }
     if (policy === 'weighted-round-robin') {
       return this.selectWeighted(providerId, ordered)
+    }
+    // Plain round-robin. accounts preserves pool (inventory) order, so the
+    // first entry is the operator's main account; bias keeps new sessions on
+    // it and only spills over while it is cooling down, disabled, or excluded.
+    if ((this.selectionBias.get(providerId) ?? DEFAULT_SELECTION_BIAS) === 'first-account') {
+      return accounts[0]!
     }
     const cursor = this.roundRobinCursor.get(providerId) ?? 0
     const selected = ordered[cursor % ordered.length]!

@@ -23,12 +23,12 @@ import type {
 type StreamKind = 'stream' | 'streamSimple'
 type RequestOptions = StreamOptions & Record<string, unknown>
 
-interface BufferedTerminal {
+export interface BufferedTerminal {
   start?: AssistantMessageEvent & { type: 'start' }
   event: AssistantMessageEvent & { type: 'error' }
 }
 
-function mergeHeaders(
+export function mergeHeaders(
   base: ProviderHeaders | undefined,
   override: ProviderHeaders | undefined,
 ): ProviderHeaders | undefined {
@@ -71,7 +71,7 @@ function applyResolvedAuth<TApi extends Api>(
   }
 }
 
-function failureFrom(
+export function failureFrom(
   error: unknown,
   response: ProviderResponse | undefined,
   outputStarted: boolean,
@@ -104,7 +104,7 @@ function callProvider<TApi extends Api>(
   return provider.stream(model, context, options as ApiStreamOptions<TApi>)
 }
 
-function replayTerminal(terminal: BufferedTerminal): AsyncIterable<AssistantMessageEvent> {
+export function replayTerminal(terminal: BufferedTerminal): AsyncIterable<AssistantMessageEvent> {
   return (async function* () {
     if (terminal.start !== undefined) yield terminal.start
     yield terminal.event
