@@ -13,6 +13,7 @@ import {
 import { describe, expect, it } from 'vitest'
 import {
   liftProvider,
+  type FailoverInfo,
   MultiProviderService,
   type ProviderAccount,
 } from '../src/index.ts'
@@ -103,8 +104,18 @@ const accounts: ProviderAccount<string>[] = [
   { id: 'b', label: 'B', authKind: 'api-key', credentialRef: 'account-b' },
 ]
 
-function setup(handler: Handler) {
-  const service = new MultiProviderService({ rateLimitCooldownMs: 60_000 })
+function setup(
+  handler: Handler,
+  options: {
+    service?: MultiProviderService
+    onFailover?: (info: FailoverInfo) => boolean | void
+  } = {},
+) {
+  // Default scheduler tolerance absorbs three errors per account; the
+  // single-error failover tests opt into the original switch-on-first-error
+  // behavior explicitly.
+  const service = options.service
+    ?? new MultiProviderService({ rateLimitCooldownMs: 60_000, errorsBeforeSwitch: 1 })
   service.registerProvider({
     id: model.provider,
     label: 'Same Provider',
@@ -120,6 +131,7 @@ function setup(handler: Handler) {
       env: { TEST_ACCOUNT: account.id },
       source: account.label,
     }),
+    ...(options.onFailover === undefined ? {} : { onFailover: options.onFailover }),
   })
   const models = createModels()
   models.setProvider(lifted)
@@ -208,6 +220,109 @@ describe('liftProvider', () => {
     expect(snapshot.providers[0]?.accounts.find(account => account.id === 'b')).toMatchObject({
       status: 'ready', consecutiveFailures: 0, inFlight: 0,
     })
+  })
+
+  it('absorbs up to three errors on one account before switching', async () => {
+    const attempts: string[] = []
+    const handler: Handler = (_requestModel, _context, options) => {
+      attempts.push(options?.apiKey ?? '')
+      const stream = createAssistantMessageEventStream()
+      void (async () => {
+        stream.push({ type: 'start', partial: message('pending') })
+        if (options?.apiKey === 'account-a') {
+          finishWithError(stream, 'HTTP 503 upstream')
+          return
+        }
+        finishWithText(stream, 'rotated')
+      })()
+      return stream
+    }
+
+    const service = new MultiProviderService({ rateLimitCooldownMs: 60_000 })
+    const { models, selected } = setup(handler, { service })
+    const stream = models.streamSimple(selected, { messages: [] })
+    const eventTypes: string[] = []
+    for await (const event of stream) eventTypes.push(event.type)
+    const result = await stream.result()
+
+    expect(eventTypes).toEqual(['start', 'text_start', 'text_delta', 'text_end', 'done'])
+    expect(attempts).toEqual(['account-a', 'account-a', 'account-a', 'account-b'])
+    const snapshot = await service.snapshot()
+    expect(snapshot.providers[0]?.accounts.find(account => account.id === 'a')).toMatchObject({
+      status: 'cooldown', consecutiveFailures: 1, inFlight: 0,
+    })
+    expect(snapshot.providers[0]?.accounts.find(account => account.id === 'b')).toMatchObject({
+      status: 'ready', consecutiveFailures: 0, inFlight: 0,
+    })
+  })
+
+  it('surfaces the buffered error when onFailover claims the transition', async () => {
+    const attempts: string[] = []
+    const hookCalls: FailoverInfo[] = []
+    const handler: Handler = (_requestModel, _context, options) => {
+      attempts.push(options?.apiKey ?? '')
+      const stream = createAssistantMessageEventStream()
+      void (async () => {
+        stream.push({ type: 'start', partial: message('pending') })
+        finishWithError(stream, 'HTTP 500 upstream')
+      })()
+      return stream
+    }
+
+    const { models, selected } = setup(handler, {
+      service: new MultiProviderService({ rateLimitCooldownMs: 60_000 }),
+      onFailover: info => {
+        hookCalls.push(info)
+        return true
+      },
+    })
+    const stream = models.streamSimple(selected, { messages: [] })
+    const eventTypes: string[] = []
+    for await (const event of stream) eventTypes.push(event.type)
+    const result = await stream.result()
+
+    // The stream ends with the failing account's error instead of rotating
+    // inline; the retry request re-enters the pool on the next account.
+    expect(attempts).toEqual(['account-a', 'account-a', 'account-a'])
+    expect(eventTypes.at(-1)).toBe('error')
+    expect(result.stopReason).toBe('error')
+    expect(hookCalls).toEqual([expect.objectContaining({
+      providerId: model.provider,
+      fromAccountId: 'a',
+      failure: expect.objectContaining({ message: 'HTTP 500 upstream', outputStarted: false }),
+      errorsOnAccount: 3,
+    })])
+  })
+
+  it('keeps rotating accounts inline when onFailover declines', async () => {
+    const attempts: string[] = []
+    let hookCalls = 0
+    const handler: Handler = (_requestModel, _context, options) => {
+      attempts.push(options?.apiKey ?? '')
+      const stream = createAssistantMessageEventStream()
+      void (async () => {
+        stream.push({ type: 'start', partial: message('pending') })
+        if (options?.apiKey === 'account-a') {
+          finishWithError(stream, 'HTTP 503 upstream')
+          return
+        }
+        finishWithText(stream, 'rotated')
+      })()
+      return stream
+    }
+
+    const { models, selected } = setup(handler, {
+      service: new MultiProviderService({ rateLimitCooldownMs: 60_000 }),
+      onFailover: () => {
+        hookCalls += 1
+        return undefined
+      },
+    })
+    const result = await models.completeSimple(selected, { messages: [] })
+
+    expect(hookCalls).toBe(1)
+    expect(attempts).toEqual(['account-a', 'account-a', 'account-a', 'account-b'])
+    expect(result.stopReason).toBe('stop')
   })
 
   it('does not replay after any output event has been exposed', async () => {

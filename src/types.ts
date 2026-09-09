@@ -131,12 +131,30 @@ export interface PublicPoolSnapshot {
 
 export interface MultiProviderSnapshot { providers: PublicPoolSnapshot[] }
 
+/**
+ * Fired when a pooled account is abandoned after its final tolerated error
+ * and the stream is about to move to another account. Returning true tells
+ * the stream to surface the buffered error instead of rotating accounts
+ * inline — an external handler (e.g. compact-then-retry) will re-enter the
+ * pool with fresh context.
+ */
+export interface FailoverInfo {
+  providerId: string
+  fromAccountId: string
+  failure: ProviderAttemptFailure
+  errorsOnAccount: number
+}
+
 export interface SchedulerSettings {
   rateLimitCooldownMs?: number
   quotaCooldownMs?: number
   authCooldownMs?: number
   transientBaseCooldownMs?: number
   maxCooldownMs?: number
+  // Pre-output retryable errors absorbed on the same account before the
+  // scheduler fails over to the next account. 1 reproduces the original
+  // switch-on-first-error behavior.
+  errorsBeforeSwitch?: number
 }
 
 // Patch form of SchedulerSettings where an explicitly undefined key clears
@@ -175,6 +193,7 @@ export const SCHEDULER_SETTING_KEYS = [
   'authCooldownMs',
   'transientBaseCooldownMs',
   'maxCooldownMs',
+  'errorsBeforeSwitch',
 ] as const satisfies readonly (keyof SchedulerSettings)[]
 
 export interface SchedulerOptions {
@@ -185,6 +204,7 @@ export interface SchedulerOptions {
   authCooldownMs?: number
   transientBaseCooldownMs?: number
   maxCooldownMs?: number
+  errorsBeforeSwitch?: number
   now?: () => number
   randomId?: () => string
 }
@@ -223,6 +243,7 @@ export interface LiftProviderOptions<TApi extends Api = Api, TCredentialRef = un
   }) => string | undefined
   disableProviderRetries?: boolean
   maxAccountAttempts?: number
+  onFailover?: (info: FailoverInfo) => boolean | void
 }
 
 export interface MultiProviderIntegration<TApi extends Api = Api, TCredentialRef = unknown>

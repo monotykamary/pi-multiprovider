@@ -51,6 +51,7 @@ const DEFAULTS = {
   authCooldownMs: 5 * 60_000,
   transientBaseCooldownMs: 1_000,
   maxCooldownMs: 60 * 60_000,
+  errorsBeforeSwitch: 3,
 }
 
 export const SCHEDULER_DEFAULTS: Required<SchedulerSettings> = {
@@ -59,6 +60,7 @@ export const SCHEDULER_DEFAULTS: Required<SchedulerSettings> = {
   authCooldownMs: DEFAULTS.authCooldownMs,
   transientBaseCooldownMs: DEFAULTS.transientBaseCooldownMs,
   maxCooldownMs: DEFAULTS.maxCooldownMs,
+  errorsBeforeSwitch: DEFAULTS.errorsBeforeSwitch,
 }
 
 function stateKey(providerId: string, accountId: string): string {
@@ -113,6 +115,7 @@ export class MultiProviderService {
       authCooldownMs: options.authCooldownMs ?? DEFAULTS.authCooldownMs,
       transientBaseCooldownMs: options.transientBaseCooldownMs ?? DEFAULTS.transientBaseCooldownMs,
       maxCooldownMs: options.maxCooldownMs ?? DEFAULTS.maxCooldownMs,
+      errorsBeforeSwitch: options.errorsBeforeSwitch ?? DEFAULTS.errorsBeforeSwitch,
     }
     this.now = options.now ?? Date.now
     this.randomId = options.randomId ?? randomUUID
@@ -282,6 +285,13 @@ export class MultiProviderService {
   getPoolPreference(providerId: string): PoolPreference {
     this.registration(providerId)
     return this.pool(providerId)
+  }
+
+  // Pre-output retryable errors a stream absorbs on one account before
+  // failing over to the next account. Clamped to at least 1 so a stream
+  // always abandons an account after a finite number of errors.
+  getErrorsBeforeSwitch(): number {
+    return Math.max(1, Math.floor(this.defaults.errorsBeforeSwitch))
   }
 
   updateSchedulerDefaults(settings: SchedulerSettings): void {

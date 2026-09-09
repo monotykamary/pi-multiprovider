@@ -93,7 +93,8 @@ function schedulerSummary(scheduler: SchedulerSettings): string {
   const rateLimit = scheduler.rateLimitCooldownMs ?? SCHEDULER_DEFAULTS.rateLimitCooldownMs
   const quota = scheduler.quotaCooldownMs ?? SCHEDULER_DEFAULTS.quotaCooldownMs
   const auth = scheduler.authCooldownMs ?? SCHEDULER_DEFAULTS.authCooldownMs
-  return `${formatMs(rateLimit)} rate-limit · ${formatMs(quota)} quota · ${formatMs(auth)} auth`
+  const errors = scheduler.errorsBeforeSwitch ?? SCHEDULER_DEFAULTS.errorsBeforeSwitch
+  return `${formatMs(rateLimit)} rate-limit · ${formatMs(quota)} quota · ${formatMs(auth)} auth · ${errors} errors/switch`
 }
 
 function mergeUpstream(
@@ -141,6 +142,38 @@ function cooldownRow(
       let selectedValue = configured === undefined ? 'default' : String(configured)
       if (!items.some((option) => option.value === selectedValue)) {
         items.push({ value: selectedValue, label: formatMs(configured ?? fallback) })
+        selectedValue = String(configured ?? fallback)
+      }
+      return new SelectSubmenu(theme, label, description, items, selectedValue, (value) => done(value), () => done())
+    },
+  })
+}
+
+// Like cooldownRow but for plain error counts instead of durations.
+function countRow(
+  theme: Theme,
+  state: PoolManagerState,
+  key: SchedulerSettingKey,
+  label: string,
+  description: string,
+  options: readonly number[],
+): SettingItem {
+  const configured = state.scheduler[key]
+  const fallback = SCHEDULER_DEFAULTS[key]
+  const formatCount = (value: number): string => `${value}`
+  const currentValue = configured === undefined
+    ? `${formatCount(fallback)} · default`
+    : formatCount(configured)
+  return setting(`scheduler.${key}`, label, currentValue, {
+    description,
+    submenu: (_currentValue, done) => {
+      const items = [
+        { value: 'default', label: `Default (${formatCount(fallback)})` },
+        ...options.map((count) => ({ value: String(count), label: formatCount(count) })),
+      ]
+      let selectedValue = configured === undefined ? 'default' : String(configured)
+      if (!items.some((option) => option.value === selectedValue)) {
+        items.push({ value: selectedValue, label: formatCount(configured ?? fallback) })
         selectedValue = String(configured ?? fallback)
       }
       return new SelectSubmenu(theme, label, description, items, selectedValue, (value) => done(value), () => done())
@@ -335,6 +368,7 @@ function buildView(
           cooldownRow(theme, state, 'authCooldownMs', 'Auth cooldown', 'Cooldown after 401/403 or invalid/expired credentials. Default 5m.', AUTH_OPTIONS),
           cooldownRow(theme, state, 'transientBaseCooldownMs', 'Transient base cooldown', 'Base for exponential backoff on transient (5xx/408/425) failures; doubles per consecutive failure. Default 1s.', TRANSIENT_OPTIONS),
           cooldownRow(theme, state, 'maxCooldownMs', 'Max cooldown', 'Upper bound applied to every cooldown. Default 60m.', MAX_COOLDOWN_OPTIONS),
+          countRow(theme, state, 'errorsBeforeSwitch', 'Errors before switch', 'Consecutive pre-output errors absorbed on the same account before failing over to the next account or provider. Default 3.', [1, 2, 3, 5]),
         ],
         persist,
       ),

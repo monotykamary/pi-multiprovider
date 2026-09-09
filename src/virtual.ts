@@ -21,6 +21,7 @@ import {
 import type { MultiProviderService } from './service.ts'
 import type {
   AccountLease,
+  FailoverInfo,
   ProviderAttemptFailure,
   ProviderRegistration,
   SelectionBias,
@@ -31,6 +32,10 @@ import type {
 
 type StreamKind = 'stream' | 'streamSimple'
 type RequestOptions = StreamOptions & Record<string, unknown>
+
+// Pause between same-account retries so consecutive absorbed errors give a
+// briefly rate-limited or recovering backend a chance to settle.
+const SAME_ACCOUNT_RETRY_DELAY_MS = 250
 
 // Virtual provider ids, virtual model ids, and provider/model ids must not
 // contain this separator: it composes scheduler ids and backend account ids.
@@ -77,6 +82,7 @@ export interface VirtualProviderDependencies {
   ) => Promise<AmbientAuthResolution>
   isBackendConfigured?: (providerId: string) => boolean
   maxAccountAttempts?: number
+  onFailover?: (info: FailoverInfo) => boolean | void
 }
 
 export interface VirtualIntegrationOptions {
@@ -150,6 +156,7 @@ function virtualStream<TApi extends Api>(
     const affinityKey = dependencies.getAffinityKey()
     const attempted = new Set<string>()
     const maxAttempts = dependencies.maxAccountAttempts ?? Number.MAX_SAFE_INTEGER
+    const errorsBeforeSwitch = service.getErrorsBeforeSwitch()
     let attempts = 0
     let lastTerminal: BufferedTerminal | undefined
     let lastSetupError: unknown
@@ -178,7 +185,12 @@ function virtualStream<TApi extends Api>(
         let outputStarted = false
         let start: BufferedTerminal['start']
         let response: ProviderResponse | undefined
-        let shouldRetry = false
+        // Per-lease outcome once the backend is abandoned: 'next-account'
+        // rotates to the next backend inline; 'surface' ends the stream with
+        // the buffered error so an external failover handler (e.g.
+        // compact-then-retry) can re-enter the pool with fresh context.
+        let leaseOutcome: 'next-account' | 'surface' | undefined
+        let sameAccountErrors = 0
 
         try {
           const target = resolveTarget(dependencies, backend)
@@ -221,55 +233,83 @@ function virtualStream<TApi extends Api>(
           }
           attemptOptions.maxRetries = 0
 
-          const inner = kind === 'streamSimple'
-            ? target.provider.streamSimple(streamModel, context, attemptOptions as SimpleStreamOptions)
-            : target.provider.stream(streamModel, context, attemptOptions as ApiStreamOptions<Api>)
+          // Same-account tolerance: pre-output retryable errors are absorbed
+          // on the current backend until errorsBeforeSwitch is reached, so a
+          // transient blip does not pay a cold-cache failover.
+          while (leaseOutcome === undefined) {
+            response = undefined
+            start = undefined
+            const inner = kind === 'streamSimple'
+              ? target.provider.streamSimple(streamModel, context, attemptOptions as SimpleStreamOptions)
+              : target.provider.stream(streamModel, context, attemptOptions as ApiStreamOptions<Api>)
 
-          for await (const event of inner) {
-            if (event.type === 'start') {
-              start = event
-              continue
-            }
-
-            if (event.type === 'error') {
-              if (event.reason === 'aborted' || signal.aborted) {
-                lease.release({ status: 'cancelled' })
-                settled = true
-              } else {
-                const failure = failureFrom(undefined, response, outputStarted, event.error)
-                const disposition = lease.release({ status: 'failure', error: failure })
-                settled = true
-                if (!outputStarted && disposition?.retryable && attempts < maxAttempts) {
-                  lastTerminal = {
-                    ...(start === undefined ? {} : { start }),
-                    event,
-                  }
-                  shouldRetry = true
-                  break
-                }
+            let retriedSameAccount = false
+            for await (const event of inner) {
+              if (event.type === 'start') {
+                start = event
+                continue
               }
 
-              if (!outputStarted && start !== undefined) yield start
+              if (event.type === 'error') {
+                if (event.reason === 'aborted' || signal.aborted) {
+                  lease.release({ status: 'cancelled' })
+                  settled = true
+                } else {
+                  const failure = failureFrom(undefined, response, outputStarted, event.error)
+                  if (!outputStarted && sameAccountErrors + 1 < errorsBeforeSwitch) {
+                    sameAccountErrors += 1
+                    await new Promise(resolve => { setTimeout(resolve, SAME_ACCOUNT_RETRY_DELAY_MS) })
+                    if (signal.aborted) {
+                      lease.release({ status: 'cancelled' })
+                      settled = true
+                      return
+                    }
+                    retriedSameAccount = true
+                    break
+                  }
+                  const disposition = lease.release({ status: 'failure', error: failure })
+                  settled = true
+                  if (!outputStarted && disposition?.retryable && attempts < maxAttempts) {
+                    lastTerminal = {
+                      ...(start === undefined ? {} : { start }),
+                      event,
+                    }
+                    leaseOutcome = dependencies.onFailover?.({
+                      providerId: schedulerId,
+                      fromAccountId: lease.accountId,
+                      failure,
+                      errorsOnAccount: sameAccountErrors + 1,
+                    }) === true
+                      ? 'surface'
+                      : 'next-account'
+                    break
+                  }
+                }
+
+                if (!outputStarted && start !== undefined) yield start
+                yield event
+                return
+              }
+
+              if (event.type === 'done') {
+                lease.release({ status: 'success' })
+                settled = true
+                if (!outputStarted && start !== undefined) yield start
+                yield event
+                return
+              }
+
+              if (!outputStarted) {
+                outputStarted = true
+                if (start !== undefined) yield start
+              }
               yield event
-              return
             }
 
-            if (event.type === 'done') {
-              lease.release({ status: 'success' })
-              settled = true
-              if (!outputStarted && start !== undefined) yield start
-              yield event
-              return
-            }
-
-            if (!outputStarted) {
-              outputStarted = true
-              if (start !== undefined) yield start
-            }
-            yield event
+            if (!retriedSameAccount) break
           }
 
-          if (shouldRetry) continue
+          if (leaseOutcome === 'next-account') continue
 
           if (!settled) {
             const error = new Error('Provider stream ended without a terminal event')
@@ -300,6 +340,8 @@ function virtualStream<TApi extends Api>(
         } finally {
           if (!settled) lease.release({ status: 'cancelled' })
         }
+
+        if (leaseOutcome === 'surface') break
       }
 
       if (lastTerminal !== undefined) {

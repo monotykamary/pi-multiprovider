@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest'
 import {
   createVirtualIntegrations,
   createVirtualProvider,
+  type FailoverInfo,
   MultiProviderService,
   virtualSchedulerId,
   type VirtualProviderConfig,
@@ -160,6 +161,10 @@ function harness(
     isBackendConfigured?: (providerId: string) => boolean
     affinityKey?: string
   } = {},
+  options: {
+    errorsBeforeSwitch?: number
+    onFailover?: VirtualProviderDependencies['onFailover']
+  } = {},
 ) {
   const attempts: Attempt[] = []
   const providers = new Map<string, Provider<Api>>([
@@ -184,13 +189,16 @@ function harness(
       return handlers.b(model as Model<'test-api'>, requestContext, options)
     })],
   ])
-  const service = new MultiProviderService()
+  const service = new MultiProviderService(
+    options.errorsBeforeSwitch === undefined ? {} : { errorsBeforeSwitch: options.errorsBeforeSwitch },
+  )
   for (const integration of createVirtualIntegrations(config)) {
     service.registerProvider(integration)
   }
   const deps: VirtualProviderDependencies = {
     service,
     config,
+    ...(options.onFailover === undefined ? {} : { onFailover: options.onFailover }),
     getAffinityKey: () => overrides.affinityKey ?? 'session-1',
     getBackingProvider: providerId =>
       overrides.missingProviders?.includes(providerId) ? undefined : providers.get(providerId),
@@ -267,10 +275,11 @@ describe('virtual providers', () => {
   })
 
   it('fails over to the next backend before output', async () => {
-    const { virtual, attempts } = harness({
-      a: () => errorStream('HTTP 500 upstream'),
-      b: () => okStream('from-b'),
-    })
+    const { virtual, attempts } = harness(
+      { a: () => errorStream('HTTP 500 upstream'), b: () => okStream('from-b') },
+      undefined,
+      { errorsBeforeSwitch: 1 },
+    )
     const events = await collect(virtual.stream(virtual.getModels()[0]!, context))
     expect(events.at(-1)).toMatchObject({ type: 'done' })
     expect(attempts.map(attempt => attempt.model)).toEqual(['model-a', 'model-b'])
@@ -287,13 +296,47 @@ describe('virtual providers', () => {
   })
 
   it('replays the terminal error once every backend is exhausted', async () => {
-    const { virtual, attempts } = harness({
-      a: () => errorStream('HTTP 500'),
-      b: () => errorStream('HTTP 503'),
-    })
+    const { virtual, attempts } = harness(
+      { a: () => errorStream('HTTP 500'), b: () => errorStream('HTTP 503') },
+      undefined,
+      { errorsBeforeSwitch: 1 },
+    )
     const events = await collect(virtual.stream(virtual.getModels()[0]!, context))
     expect(events.at(-1)).toMatchObject({ type: 'error' })
     expect(attempts).toHaveLength(2)
+  })
+
+  it('absorbs up to three backend errors before failing over', async () => {
+    const { virtual, attempts } = harness({
+      a: () => errorStream('HTTP 503'),
+      b: () => okStream('from-b'),
+    })
+    const events = await collect(virtual.stream(virtual.getModels()[0]!, context))
+    expect(events.at(-1)).toMatchObject({ type: 'done' })
+    expect(attempts.map(attempt => attempt.model)).toEqual(['model-a', 'model-a', 'model-a', 'model-b'])
+  })
+
+  it('surfaces the buffered error when onFailover claims the transition', async () => {
+    const hookCalls: FailoverInfo[] = []
+    const { virtual, attempts } = harness(
+      { a: () => errorStream('HTTP 500'), b: () => errorStream('HTTP 503') },
+      {},
+      {
+        onFailover: info => {
+          hookCalls.push(info)
+          return true
+        },
+      },
+    )
+    const events = await collect(virtual.stream(virtual.getModels()[0]!, context))
+    expect(events.at(-1)).toMatchObject({ type: 'error' })
+    expect(attempts.map(attempt => attempt.model)).toEqual(['model-a', 'model-a', 'model-a'])
+    expect(hookCalls).toEqual([expect.objectContaining({
+      providerId: virtualSchedulerId('pooled', 'ultra'),
+      fromAccountId: 'prov-a::model-a',
+      failure: expect.objectContaining({ message: 'HTTP 500', outputStarted: false }),
+      errorsOnAccount: 3,
+    })])
   })
 
   it('reports unconfigured auth when no backend provider is configured', async () => {

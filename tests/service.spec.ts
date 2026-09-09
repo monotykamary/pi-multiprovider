@@ -39,6 +39,15 @@ function failure(status: number): ProviderAttemptFailure {
 }
 
 describe('MultiProviderService', () => {
+  it('absorbs a configurable number of errors before failing over', async () => {
+    const service = new MultiProviderService()
+    expect(service.getErrorsBeforeSwitch()).toBe(3)
+    service.updateSchedulerDefaults({ errorsBeforeSwitch: 5 })
+    expect(service.getErrorsBeforeSwitch()).toBe(5)
+    service.updateSchedulerDefaults({ errorsBeforeSwitch: 0 })
+    expect(service.getErrorsBeforeSwitch()).toBe(1)
+  })
+
   it('keeps unpinned selection on the main account and never exposes credential references', async () => {
     const service = scheduler()
     expect(await select(service)).toBe('a')

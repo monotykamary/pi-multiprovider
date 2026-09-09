@@ -20,6 +20,7 @@ import {
   createManagedIntegration,
   createServiceAnnouncement,
   getMultiAuthPath,
+  type FailoverInfo,
   liftProvider,
   MULTIPROVIDER_REGISTER_EVENT,
   MULTIPROVIDER_SERVICE_EVENT,
@@ -590,6 +591,63 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   }
   announceService()
 
+  // Failover compaction: when a pooled account is abandoned after its final
+  // tolerated error, switching to the next account resends the full request
+  // context against a cold prompt cache. If pi-fabric is installed, its
+  // deterministic (LLM-free) compaction engine shrinks the session during
+  // the retry backoff window so the next account serves a small prefill.
+  // While a compaction is scheduled, the stream surfaces the buffered error
+  // instead of rotating accounts inline; the resulting retry run rebuilds
+  // its context snapshot after compaction and lands on the next account.
+  const FAILOVER_COMPACT_DEBOUNCE_MS = 30_000
+  const FAILOVER_COMPACT_IDLE_TIMEOUT_MS = 15_000
+  let lastFailoverCompactAt = 0
+
+  const isFabricCompactionAvailable = (): boolean => {
+    try {
+      return pi.getAllTools().some(tool => tool.name === 'fabric_exec')
+    } catch {
+      return false
+    }
+  }
+
+  const runFailoverCompaction = async (info: FailoverInfo): Promise<void> => {
+    const ctx = currentContext
+    if (ctx === undefined) return
+    const startedAt = Date.now()
+    if (startedAt - lastFailoverCompactAt < FAILOVER_COMPACT_DEBOUNCE_MS) return
+    try {
+      const pool = (await service.snapshot()).providers.find(
+        candidate => candidate.id === info.providerId,
+      )
+      if (pool === undefined || pool.accounts.filter(account => account.enabled).length < 2) return
+    } catch {
+      return
+    }
+    // Wait out the failing run so compaction never aborts an active stream;
+    // ctx.compact() aborts the current run as its first step.
+    const deadline = startedAt + FAILOVER_COMPACT_IDLE_TIMEOUT_MS
+    while (!ctx.isIdle() && Date.now() < deadline) {
+      await new Promise(resolve => { setTimeout(resolve, 50) })
+    }
+    if (!ctx.isIdle() || Date.now() - lastFailoverCompactAt < FAILOVER_COMPACT_DEBOUNCE_MS) return
+    lastFailoverCompactAt = Date.now()
+    ctx.compact({
+      onComplete: () => {
+        ctx.ui.notify('multiprovider: compacted session context before account failover', 'info')
+      },
+      onError: () => {},
+    })
+  }
+
+  const handleFailover = (info: FailoverInfo): boolean => {
+    const integration = effectiveIntegration(info.providerId)
+    const handled = integration?.onFailover?.(info) === true
+    if (!isFabricCompactionAvailable()) return handled
+    void runFailoverCompaction(info)
+    return true
+  }
+
   const restoreProvider = (providerId: string, ctx?: ExtensionContext): void => {
     const base = baseProviders.get(providerId)
     const installed = installedProviders.get(providerId)
@@ -645,7 +703,11 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     if (current === priorLift && baseProviders.get(providerId) === base) return
     const affinityKey = integration.affinityKey
       ?? (() => ctx.sessionManager.getSessionId())
-    const lifted = liftProvider(base, service, { ...integration, affinityKey })
+    const lifted = liftProvider(base, service, {
+      ...integration,
+      affinityKey,
+      onFailover: handleFailover,
+    })
     pi.registerProvider(lifted)
     baseProviders.set(providerId, base)
     installedProviders.set(providerId, lifted)
@@ -723,6 +785,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       const virtualProvider = createVirtualProvider({
         service,
         config,
+        onFailover: handleFailover,
         getAffinityKey: () => sessionContext()?.sessionManager.getSessionId() ?? '',
         getBackingProvider: providerId =>
           installedProviders.get(providerId)

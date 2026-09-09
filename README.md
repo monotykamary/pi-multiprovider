@@ -35,6 +35,7 @@ If an account fails before visible output, the lift can cool it down and retry a
 | 🧬 | **Upstream merge** | Optionally treats Pi's normal `/login`, `auth.json`, environment, or ambient credential as another account—editable inline like any stored account. |
 | 🩺 | **Health-aware leases** | Tracks in-flight work, failures, cooldowns, session affinity, and retry exclusions. |
 | 🛡️ | **Stream-safe failover** | Suppresses a rejected attempt's start/error events and retries only before user-visible output. |
+| 🧱 | **Error tolerance before switching** | Absorbs up to 3 pre-output errors on the same account before failing over, so one blip never pays a cold-cache switch. |
 | 🪪 | **Stable identity** | Provider ID, model ID, model picker entries, routing, and session history remain unchanged. |
 
 ## Install
@@ -117,6 +118,12 @@ Add as many accounts as you need from the same manager. Remove credentials from 
 First-account bias keeps every new session on the account listed first in the pool—**Pi default (upstream)** when included, otherwise the first stored account—so you stop seeing sessions start on a backup account while the main one has plenty of usage. Integrations that want even request rotation register with `selectionBias: 'none'`, which restores the classic rotate-through-healthy-accounts behavior.
 
 Session affinity can pin a healthy account to the current Pi session. Explicit retry exclusions always win, so a rejected account is not selected twice for the same logical request. Switch strategies, affinity, and per-account weight and priority at any time inside `/multilogin`. `/switch-account` sets the pinned account explicitly for one session without touching these settings.
+
+### Error tolerance and failover compaction
+
+A rejected account is not abandoned on the first error. Each stream absorbs up to `errorsBeforeSwitch` (default **3**, configurable in the `/multilogin` Scheduler panel) pre-output errors on the same account—separated by a short pause—before releasing the lease, applying the failure cooldown, and moving to the next account. Errors after output has started and non-retryable failures surface immediately, exactly as before.
+
+When [pi-fabric](https://github.com/monotykamary/pi-fabric) is installed, failing over to a different account first compacts the session with fabric's deterministic, LLM-free compaction engine. The failing request surfaces its error, the session compacts while the retry backoff runs, and the retry lands on the next account with a small context instead of a huge cold prefill. This is the default behavior; without fabric installed, streams rotate accounts inline as before.
 
 ## Virtual providers
 

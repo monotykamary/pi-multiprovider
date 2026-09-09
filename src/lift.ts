@@ -23,6 +23,10 @@ import type {
 type StreamKind = 'stream' | 'streamSimple'
 type RequestOptions = StreamOptions & Record<string, unknown>
 
+// Pause between same-account retries so consecutive absorbed errors give a
+// briefly rate-limited or recovering backend a chance to settle.
+const SAME_ACCOUNT_RETRY_DELAY_MS = 250
+
 export interface BufferedTerminal {
   start?: AssistantMessageEvent & { type: 'start' }
   event: AssistantMessageEvent & { type: 'error' }
@@ -130,6 +134,7 @@ function liftedStream<TApi extends Api, TCredentialRef>(
         : await liftOptions.excludeAccountIds(requestContext),
     )
     const maxAttempts = liftOptions.maxAccountAttempts ?? Number.MAX_SAFE_INTEGER
+    const errorsBeforeSwitch = service.getErrorsBeforeSwitch()
     const affinityKey = liftOptions.affinityKey?.({ provider, model, context })
     let attempts = 0
     let lastRejected: BufferedTerminal | undefined
@@ -158,7 +163,12 @@ function liftedStream<TApi extends Api, TCredentialRef>(
         let outputStarted = false
         let start: BufferedTerminal['start']
         let response: ProviderResponse | undefined
-        let shouldRetry = false
+        // Per-lease outcome once the account is abandoned: 'next-account'
+        // rotates to the next account inline; 'surface' ends the stream with
+        // the buffered error so an external failover handler (e.g.
+        // compact-then-retry) can re-enter the pool with fresh context.
+        let leaseOutcome: 'next-account' | 'surface' | undefined
+        let sameAccountErrors = 0
 
         try {
           let resolved: AuthResult
@@ -198,64 +208,92 @@ function liftedStream<TApi extends Api, TCredentialRef>(
           }
           if (liftOptions.disableProviderRetries !== false) attemptOptions.maxRetries = 0
 
-          const inner = callProvider(
-            provider,
-            kind,
-            applied.model,
-            context,
-            attemptOptions,
-          )
+          // Same-account tolerance: pre-output retryable errors are absorbed
+          // on the current account until errorsBeforeSwitch is reached, so a
+          // transient blip does not pay a cold-cache failover.
+          while (leaseOutcome === undefined) {
+            response = undefined
+            start = undefined
+            const inner = callProvider(
+              provider,
+              kind,
+              applied.model,
+              context,
+              attemptOptions,
+            )
 
-          for await (const event of inner) {
-            if (event.type === 'start') {
-              start = event
-              continue
-            }
-
-            if (event.type === 'error') {
-              if (event.reason === 'aborted' || signal.aborted) {
-                lease.release({ status: 'cancelled' })
-                settled = true
-              } else {
-                const failure = failureFrom(
-                  undefined,
-                  response,
-                  outputStarted,
-                  event.error,
-                )
-                const disposition = lease.release({ status: 'failure', error: failure })
-                settled = true
-                if (!outputStarted && disposition?.retryable && attempts < maxAttempts) {
-                  lastRejected = {
-                    ...(start === undefined ? {} : { start }),
-                    event,
-                  }
-                  shouldRetry = true
-                  break
-                }
+            let retriedSameAccount = false
+            for await (const event of inner) {
+              if (event.type === 'start') {
+                start = event
+                continue
               }
 
-              if (!outputStarted && start !== undefined) yield start
+              if (event.type === 'error') {
+                if (event.reason === 'aborted' || signal.aborted) {
+                  lease.release({ status: 'cancelled' })
+                  settled = true
+                } else {
+                  const failure = failureFrom(
+                    undefined,
+                    response,
+                    outputStarted,
+                    event.error,
+                  )
+                  if (!outputStarted && sameAccountErrors + 1 < errorsBeforeSwitch) {
+                    sameAccountErrors += 1
+                    await new Promise(resolve => { setTimeout(resolve, SAME_ACCOUNT_RETRY_DELAY_MS) })
+                    if (signal.aborted) {
+                      lease.release({ status: 'cancelled' })
+                      settled = true
+                      return
+                    }
+                    retriedSameAccount = true
+                    break
+                  }
+                  const disposition = lease.release({ status: 'failure', error: failure })
+                  settled = true
+                  if (!outputStarted && disposition?.retryable && attempts < maxAttempts) {
+                    lastRejected = {
+                      ...(start === undefined ? {} : { start }),
+                      event,
+                    }
+                    leaseOutcome = liftOptions.onFailover?.({
+                      providerId: provider.id,
+                      fromAccountId: lease.accountId,
+                      failure,
+                      errorsOnAccount: sameAccountErrors + 1,
+                    }) === true
+                      ? 'surface'
+                      : 'next-account'
+                    break
+                  }
+                }
+
+                if (!outputStarted && start !== undefined) yield start
+                yield event
+                return
+              }
+
+              if (event.type === 'done') {
+                lease.release({ status: 'success' })
+                settled = true
+                if (!outputStarted && start !== undefined) yield start
+                yield event
+                return
+              }
+
+              if (!outputStarted) {
+                outputStarted = true
+                if (start !== undefined) yield start
+              }
               yield event
-              return
             }
 
-            if (event.type === 'done') {
-              lease.release({ status: 'success' })
-              settled = true
-              if (!outputStarted && start !== undefined) yield start
-              yield event
-              return
-            }
-
-            if (!outputStarted) {
-              outputStarted = true
-              if (start !== undefined) yield start
-            }
-            yield event
+            if (!retriedSameAccount) break
           }
 
-          if (shouldRetry) continue
+          if (leaseOutcome === 'next-account') continue
 
           if (!settled) {
             const error = new Error('Provider stream ended without a terminal event')
@@ -286,6 +324,8 @@ function liftedStream<TApi extends Api, TCredentialRef>(
         } finally {
           if (!settled) lease.release({ status: 'cancelled' })
         }
+
+        if (leaseOutcome === 'surface') break
       }
 
       if (lastRejected !== undefined) {
