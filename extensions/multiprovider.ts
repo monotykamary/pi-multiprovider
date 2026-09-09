@@ -7,6 +7,7 @@ import {
 } from '@earendil-works/pi-coding-agent'
 import {
   Container,
+  Input,
   type SettingItem,
   SettingsList,
   type SettingsListTheme,
@@ -46,13 +47,6 @@ import {
 
 type AnyIntegration = MultiProviderIntegration<Api, unknown>
 type VirtualBackendRef = import('../src/index.ts').VirtualBackend
-
-interface SearchableOption {
-  value: string
-  label: string
-  /** Secondary text rendered muted on the right side of the row. */
-  secondary?: string
-}
 
 interface SettingsListInternals {
   readonly searchEnabled: boolean
@@ -101,48 +95,344 @@ class DynamicColumnSettingsList extends SettingsList {
   }
 }
 
-// Same dialog pattern as the /fabric settings view: a bordered container
-// holding a searchable SettingsList whose built-in search input, blank-line
-// spacing, dim hints, and accent cursor match pi's settings styling.
-class SearchableSelectDialog extends Container {
-  private readonly settingsList: SettingsList
+type VirtualEditorOutcome =
+  | { kind: 'dismissed' }
+  | { kind: 'saved'; draft: VirtualProviderConfig }
+  | { kind: 'discarded' }
+  | { kind: 'removed'; id: string }
 
-  constructor(
-    theme: Theme,
-    title: string,
-    options: SearchableOption[],
-    onSelect: (value: string) => void,
-    onCancel: () => void,
-  ) {
+type EditorPage =
+  | { kind: 'root' }
+  | { kind: 'menu' }
+  | { kind: 'provider-picker' }
+  | { kind: 'model-picker' }
+  | { kind: 'backend' }
+  | { kind: 'input'; purpose: 'provider-id' | 'model-id' | 'weight' }
+
+// Single-host editor for the /vprovider flow, styled after the /model and
+// hide-providers selectors: every page (root menu, create inputs, editor
+// menu, pickers, backend actions) swaps inside one bordered dialog the way
+// /fabric settings does, so moving between pages never tears down to the
+// chat view.
+class VirtualProviderEditorDialog extends Container {
+  private readonly theme: Theme
+  private readonly stored: VirtualProviderConfig[]
+  private readonly candidates: Provider<Api>[]
+  private readonly isProviderIdAvailable: (id: string) => boolean
+  private readonly done: (outcome: VirtualEditorOutcome) => void
+  private readonly pageContainer = new Container()
+  private readonly listTheme: SettingsListTheme
+  private draft: VirtualProviderConfig | undefined
+  private page: EditorPage
+  private inputBackPage: EditorPage = { kind: 'root' }
+  private createProviderId: string | undefined
+  private chosenProvider: Provider<Api> | undefined
+  private activeBackendIndex = 0
+  private inputInitial = ''
+  private pageError = ''
+  private activeList: SettingsList | undefined
+  private activeInput: Input | undefined
+
+  constructor(options: {
+    theme: Theme
+    stored: VirtualProviderConfig[]
+    candidates: Provider<Api>[]
+    isProviderIdAvailable: (id: string) => boolean
+    startDraft: VirtualProviderConfig | undefined
+    done: (outcome: VirtualEditorOutcome) => void
+  }) {
     super()
-    this.addChild(new DynamicBorder(s => theme.fg('border', s)))
-    this.addChild(new Text(theme.fg('muted', 'Selecting: ') + theme.fg('accent', title), 1, 0))
-    this.addChild(new Spacer(1))
-    this.settingsList = new DynamicColumnSettingsList(
-      options.map(option => ({
-        id: option.value,
-        label: option.label,
-        currentValue: option.secondary ?? '',
-        values: [option.value],
-      })),
-      10,
-      {
-        label: (text, selected) => (selected ? theme.fg('accent', text) : text),
-        value: text => theme.fg('muted', text),
-        description: text => theme.fg('muted', text),
-        cursor: theme.fg('accent', '→ '),
-        hint: text => theme.fg('muted', text),
-      },
-      onSelect,
-      onCancel,
-      { enableSearch: true },
-    )
-    this.addChild(this.settingsList)
-    this.addChild(new DynamicBorder(s => theme.fg('border', s)))
+    this.theme = options.theme
+    this.stored = options.stored
+    this.candidates = options.candidates
+    this.isProviderIdAvailable = options.isProviderIdAvailable
+    this.done = options.done
+    this.draft = options.startDraft
+    this.page = options.startDraft === undefined ? { kind: 'root' } : { kind: 'menu' }
+    this.listTheme = {
+      label: (text, selected) => (selected ? this.theme.fg('accent', text) : text),
+      value: text => this.theme.fg('muted', text),
+      description: text => this.theme.fg('muted', text),
+      cursor: this.theme.fg('accent', '→ '),
+      hint: text => this.theme.fg('muted', text),
+    }
+    this.addChild(new DynamicBorder(s => this.theme.fg('border', s)))
+    this.addChild(this.pageContainer)
+    this.addChild(new DynamicBorder(s => this.theme.fg('border', s)))
+    this.enterPage()
   }
 
   handleInput(data: string): void {
-    this.settingsList.handleInput(data)
+    if (this.activeInput !== undefined) this.activeInput.handleInput(data)
+    else this.activeList?.handleInput(data)
+  }
+
+  private goTo(page: EditorPage): void {
+    this.page = page
+    this.pageError = ''
+    this.enterPage()
+  }
+
+  private enterPage(): void {
+    this.activeList = undefined
+    this.activeInput = undefined
+    this.pageContainer.clear()
+    if (this.page.kind === 'root') this.buildRoot()
+    else if (this.page.kind === 'menu') this.buildMenu()
+    else if (this.page.kind === 'provider-picker') this.buildProviderPicker()
+    else if (this.page.kind === 'model-picker') this.buildModelPicker()
+    else if (this.page.kind === 'backend') this.buildBackendActions()
+    else this.buildInput()
+  }
+
+  // Matches the /model and hide-providers selectors: blank line after the
+  // border, flush-left accent title, muted description, then the list.
+  private addHeading(title: string, description: string): void {
+    this.pageContainer.addChild(new Text(this.theme.fg('accent', this.theme.bold(title)), 0, 0))
+    this.pageContainer.addChild(new Text(this.theme.fg('muted', description), 0, 0))
+    this.pageContainer.addChild(new Spacer(1))
+    if (this.pageError !== '') {
+      this.pageContainer.addChild(new Text(this.theme.fg('warning', this.pageError), 0, 0))
+      this.pageContainer.addChild(new Spacer(1))
+    }
+  }
+
+  private attachList(
+    title: string,
+    description: string,
+    items: SettingItem[],
+    onSelect: (id: string) => void,
+    onCancel: () => void,
+  ): void {
+    this.addHeading(title, description)
+    this.activeList = new DynamicColumnSettingsList(
+      items,
+      10,
+      this.listTheme,
+      id => onSelect(id),
+      onCancel,
+      { enableSearch: true },
+    )
+    this.pageContainer.addChild(this.activeList)
+  }
+
+  private menuItem(id: string, label: string): SettingItem {
+    return { id, label, currentValue: '', values: [id] }
+  }
+
+  private separatorItem(id: string): SettingItem {
+    return { id, label: '', currentValue: '' }
+  }
+
+  private buildRoot(): void {
+    const items: SettingItem[] = [
+      this.menuItem('create', 'Create new virtual provider'),
+      ...this.stored.map(config => this.menuItem(`edit-${config.id}`, `Edit ${config.id}`)),
+      ...this.stored.map(config => this.menuItem(`delete-${config.id}`, `Delete ${config.id}`)),
+    ]
+    this.attachList(
+      'Virtual providers',
+      'Create, edit, or remove virtual providers that map one model across provider models.',
+      items,
+      id => {
+        if (id === 'create') {
+          this.createProviderId = undefined
+          this.inputBackPage = { kind: 'root' }
+          this.inputInitial = 'pooled'
+          this.goTo({ kind: 'input', purpose: 'provider-id' })
+        } else if (id.startsWith('edit-')) {
+          const target = this.stored.find(candidate => candidate.id === id.slice(5))
+          if (target === undefined) return
+          this.draft = structuredClone(target)
+          this.goTo({ kind: 'menu' })
+        } else if (id.startsWith('delete-')) {
+          this.done({ kind: 'removed', id: id.slice(7) })
+        }
+      },
+      () => this.done({ kind: 'dismissed' }),
+    )
+  }
+
+  private buildMenu(): void {
+    const model = this.draft!.models[0]!
+    const items: SettingItem[] = [
+      this.menuItem('model-id', `Model id: ${model.id}`),
+      this.menuItem('add', 'Add backing provider model'),
+      this.separatorItem('sep-top'),
+      ...model.backends.map((backend, index) => this.menuItem(
+        `backend-${index}`,
+        `${index + 1}. ${backend.providerId} · ${backend.modelId}`
+          + ` · ${backend.enabled === false ? 'disabled' : 'enabled'} · w${backend.weight ?? 1}`,
+      )),
+      this.separatorItem('sep-bottom'),
+      this.menuItem('save', 'Save and apply'),
+      this.menuItem('discard', 'Discard changes'),
+    ]
+    this.attachList(
+      `Virtual provider "${this.draft!.id}"`,
+      'Enter selects · Esc discards changes.',
+      items,
+      id => {
+        if (id === 'model-id') {
+          this.inputBackPage = { kind: 'menu' }
+          this.inputInitial = model.id
+          this.goTo({ kind: 'input', purpose: 'model-id' })
+        } else if (id === 'add') {
+          this.goTo({ kind: 'provider-picker' })
+        } else if (id === 'save') {
+          if (model.backends.filter(backend => backend.enabled !== false).length === 0) {
+            this.pageError = 'Add at least one enabled backing provider model before saving.'
+            this.enterPage()
+            return
+          }
+          this.done({ kind: 'saved', draft: this.draft! })
+        } else if (id === 'discard') {
+          this.done({ kind: 'discarded' })
+        } else if (id.startsWith('backend-')) {
+          this.activeBackendIndex = Number(id.slice(8))
+          this.goTo({ kind: 'backend' })
+        }
+      },
+      () => this.done({ kind: 'discarded' }),
+    )
+  }
+
+  private buildProviderPicker(): void {
+    const items: SettingItem[] = this.candidates.map(provider => ({
+      id: provider.id,
+      label: `${provider.name} (${provider.id})`,
+      currentValue: '',
+      values: [provider.id],
+    }))
+    this.attachList(
+      'Backing provider',
+      'Type to search · Enter picks the provider · Esc goes back.',
+      items,
+      id => {
+        const chosen = this.candidates.find(candidate => candidate.id === id)
+        if (chosen === undefined) return
+        this.chosenProvider = chosen
+        this.goTo({ kind: 'model-picker' })
+      },
+      () => this.goTo({ kind: 'menu' }),
+    )
+  }
+
+  private buildModelPicker(): void {
+    const catalog = this.chosenProvider!.getModels()
+    const items: SettingItem[] = catalog.map(candidate => ({
+      id: candidate.id,
+      label: candidate.id,
+      currentValue: candidate.name,
+      values: [candidate.id],
+    }))
+    this.attachList(
+      `Backing model for ${this.chosenProvider!.name}`,
+      'Type to search · Enter picks the model · Esc goes back.',
+      items,
+      id => {
+        const chosen = catalog.find(candidate => candidate.id === id)
+        const providerId = this.chosenProvider?.id
+        if (chosen === undefined || providerId === undefined) return
+        const model = this.draft!.models[0]!
+        if (model.backends.some(backend =>
+          backend.providerId === providerId && backend.modelId === chosen.id)) {
+          this.pageError = 'That provider model is already a backend.'
+          this.enterPage()
+          return
+        }
+        model.backends.push({ providerId, modelId: chosen.id, weight: 1 })
+        this.goTo({ kind: 'menu' })
+      },
+      () => this.goTo({ kind: 'menu' }),
+    )
+  }
+
+  private buildBackendActions(): void {
+    const backend = this.draft!.models[0]!.backends[this.activeBackendIndex]!
+    const items: SettingItem[] = [
+      this.menuItem('toggle', backend.enabled === false ? 'Enable' : 'Disable'),
+      this.menuItem('weight', 'Set weight'),
+      this.menuItem('remove', 'Remove'),
+    ]
+    this.attachList(
+      `${backend.providerId} · ${backend.modelId}`,
+      'Enter selects · Esc goes back.',
+      items,
+      id => {
+        if (id === 'toggle') {
+          backend.enabled = backend.enabled === false
+        } else if (id === 'weight') {
+          this.inputBackPage = { kind: 'menu' }
+          this.inputInitial = String(backend.weight ?? 1)
+          this.goTo({ kind: 'input', purpose: 'weight' })
+        } else if (id === 'remove') {
+          this.draft!.models[0]!.backends.splice(this.activeBackendIndex, 1)
+        } else return
+        this.goTo({ kind: 'menu' })
+      },
+      () => this.goTo({ kind: 'menu' }),
+    )
+  }
+
+  private buildInput(): void {
+    const purpose = this.page.kind === 'input' ? this.page.purpose : 'model-id'
+    const title = purpose === 'provider-id'
+      ? 'Virtual provider id'
+      : purpose === 'model-id' ? 'Virtual model id (shown in /model)' : 'Set weight'
+    this.addHeading(title, 'Enter confirms · Esc goes back.')
+    const input = new Input()
+    input.setValue(this.inputInitial)
+    input.onSubmit = () => this.applyInput(purpose, input.getValue())
+    input.onEscape = () => this.goTo(this.inputBackPage)
+    this.activeInput = input
+    this.pageContainer.addChild(input)
+  }
+
+  private applyInput(purpose: 'provider-id' | 'model-id' | 'weight', raw: string): void {
+    const value = raw.trim()
+    if (purpose === 'provider-id') {
+      if (!VIRTUAL_ID_PATTERN.test(value) || !this.isProviderIdAvailable(value)) {
+        this.pageError = 'Provider id is invalid or already registered.'
+        this.inputInitial = value
+        this.enterPage()
+        return
+      }
+      this.createProviderId = value
+      this.inputInitial = value
+      this.goTo({ kind: 'input', purpose: 'model-id' })
+      return
+    }
+    if (purpose === 'model-id') {
+      if (!VIRTUAL_ID_PATTERN.test(value)) {
+        this.pageError = 'Use letters, numbers, dots, dashes, or underscores for the model id.'
+        this.inputInitial = value
+        this.enterPage()
+        return
+      }
+      if (this.draft === undefined) {
+        this.draft = {
+          id: this.createProviderId!,
+          label: this.createProviderId!,
+          models: [{ id: value, backends: [] }],
+        }
+        this.pageError = 'Add at least one enabled backing provider model, then choose "Save and apply".'
+      } else {
+        this.draft.models[0]!.id = value
+      }
+      this.goTo({ kind: 'menu' })
+      return
+    }
+    const parsed = Number(value)
+    const backend = this.draft!.models[0]!.backends[this.activeBackendIndex]
+    if (!Number.isInteger(parsed) || parsed < 1 || backend === undefined) {
+      this.pageError = 'Weight must be an integer ≥ 1.'
+      this.inputInitial = value
+      this.enterPage()
+      return
+    }
+    backend.weight = parsed
+    this.goTo({ kind: 'menu' })
   }
 }
 
@@ -476,116 +766,6 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     ])
     for (const providerId of ids) await install(providerId, ctx)
     await refreshVirtual()
-  }
-
-  // Fixed-height, type-to-filter selection dialog following the /fabric
-  // settings pattern (searchable SettingsList in a bordered container).
-  const searchableSelect = async (
-    ctx: ExtensionContext,
-    title: string,
-    options: SearchableOption[],
-  ): Promise<string | undefined> => {
-    if (options.length === 0) return undefined
-    const result = await ctx.ui.custom<string | null>((_tui, theme, _keybindings, done) =>
-      new SearchableSelectDialog(theme, title, options, value => done(value), () => done(null)))
-    return result ?? undefined
-  }
-
-  // Interactive editor for a virtual provider draft. The UI manages one
-  // virtual model per provider; extra models (created programmatically) are
-  // preserved untouched through saves.
-  const editVirtualProvider = async (
-    ctx: ExtensionContext,
-    draft: VirtualProviderConfig,
-  ): Promise<boolean> => {
-    const model = draft.models[0]!
-    while (true) {
-      const muted = (text: string): string => ctx.ui.theme.fg('muted', text)
-      const rows: string[] = [
-        `Model id: ${model.id}`,
-        'Add backing provider model',
-        ...model.backends.map((backend, backendIndex) =>
-          muted(`${backendIndex + 1}. ${backend.providerId} · ${backend.modelId}`
-            + ` · ${backend.enabled === false ? 'disabled' : 'enabled'} · w${backend.weight ?? 1}`)),
-        'Save and apply',
-        'Discard changes',
-      ]
-      const selected = await ctx.ui.select(`Virtual provider "${draft.id}":`, rows)
-      const rowIndex = rows.indexOf(selected ?? '')
-      if (rowIndex < 0) return false
-      const row = rows[rowIndex]!
-
-      if (row === 'Discard changes') return false
-      if (row === 'Save and apply') {
-        if (model.backends.filter(backend => backend.enabled !== false).length === 0) {
-          ctx.ui.notify('Add at least one enabled backing provider model first.', 'error')
-          continue
-        }
-        await store.saveVirtualProvider(draft)
-        await reconcile(ctx)
-        return true
-      }
-      if (row.startsWith('Model id: ')) {
-        const next = await ctx.ui.input('Virtual model id (shown in /model):', model.id)
-        if (next !== undefined && next.trim() !== '') {
-          const id = next.trim()
-          if (!VIRTUAL_ID_PATTERN.test(id)) {
-            ctx.ui.notify('Use letters, numbers, dots, dashes, or underscores.', 'error')
-          } else {
-            model.id = id
-          }
-        }
-        continue
-      }
-      if (row === 'Add backing provider model') {
-        const candidates = uniqueProviders(ctx, baseProviders)
-          .filter(provider => !virtualProviders.has(provider.id) && provider.getModels().length > 0)
-        if (candidates.length === 0) {
-          ctx.ui.notify('No registered providers expose models yet.', 'warning')
-          continue
-        }
-        const providerId = await searchableSelect(ctx, 'Backing provider:', candidates.map(candidate => ({
-          value: candidate.id,
-          label: `${candidate.name} (${candidate.id})`,
-        })))
-        const chosen = candidates.find(candidate => candidate.id === providerId)
-        if (chosen === undefined) continue
-        const catalog = chosen.getModels()
-        const modelId = await searchableSelect(ctx, `Backing model for ${chosen.name}:`, catalog.map(candidate => ({
-          value: candidate.id,
-          label: candidate.id,
-          secondary: candidate.name,
-        })))
-        const backingModel = catalog.find(candidate => candidate.id === modelId)
-        if (backingModel === undefined) continue
-        if (model.backends.some(backend =>
-          backend.providerId === chosen.id && backend.modelId === backingModel.id)) {
-          ctx.ui.notify('That provider model is already a backend.', 'warning')
-          continue
-        }
-        model.backends.push({ providerId: chosen.id, modelId: backingModel.id, weight: 1 })
-        continue
-      }
-      const backendMatch = /^(\d+)\. /.exec(row.replace(/\x1b\[[0-9;]*m/g, ''))
-      if (backendMatch === null) continue
-      const backendNumber = Number(backendMatch[1]!)
-      const backend = model.backends[backendNumber - 1]
-      if (backend === undefined) continue
-      const actions = [backend.enabled === false ? 'Enable' : 'Disable', 'Set weight', 'Remove']
-      const actionIndex = actions.indexOf(await ctx.ui.select(`${backend.providerId} · ${backend.modelId}:`, actions) ?? '')
-      if (actionIndex < 0) continue
-      if (actionIndex === 0) {
-        backend.enabled = backend.enabled === false
-      } else if (actionIndex === 1) {
-        const next = await ctx.ui.input('Weight (1 = equal share):', String(backend.weight ?? 1))
-        if (next === undefined) continue
-        const parsed = Number(next)
-        if (Number.isInteger(parsed) && parsed >= 1) backend.weight = parsed
-        else ctx.ui.notify('Weight must be an integer ≥ 1.', 'error')
-      } else {
-        model.backends.splice(backendNumber - 1, 1)
-      }
-    }
   }
 
   const unsubscribeRegistration = pi.events.on(MULTIPROVIDER_REGISTER_EVENT, value => {
@@ -960,75 +1140,36 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       }
       await reconcile(ctx)
       const stored = await store.listVirtualProviders()
+      const candidates = uniqueProviders(ctx, baseProviders)
+        .filter(provider => !virtualProviders.has(provider.id) && provider.getModels().length > 0)
       const ref = args.trim().toLowerCase()
-      if (ref !== '') {
-        const existing = stored.find(candidate => candidate.id.toLowerCase() === ref)
-        if (existing !== undefined) {
-          const draft = structuredClone(existing)
-          if (await editVirtualProvider(ctx, draft)) {
-            ctx.ui.notify(`Saved virtual provider "${draft.id}". Select "${draft.models[0]!.id}" on provider "${draft.id}" in /model.`, 'info')
-          }
-          return
-        }
-      }
-
-      const rows = [
-        'Create new virtual provider',
-        ...stored.map(candidate => `Edit ${candidate.id}`),
-        ...stored.map(candidate => `Delete ${candidate.id}`),
-      ]
-      const selected = await ctx.ui.select('Virtual providers:', rows)
-      const index = rows.indexOf(selected ?? '')
-      if (index < 0) return
-      const row = rows[index]!
-
-      if (row === 'Create new virtual provider') {
-        const idInput = await ctx.ui.input('Virtual provider id:', 'pooled')
-        if (idInput === undefined) return
-        const id = idInput.trim()
-        if (!VIRTUAL_ID_PATTERN.test(id) || virtualProviders.has(id)
-          || ctx.modelRegistry.getProvider(id) !== undefined) {
-          ctx.ui.notify('Provider id is invalid or already registered.', 'error')
-          return
-        }
-        const modelIdInput = await ctx.ui.input('Virtual model id (shown in /model):', id)
-        if (modelIdInput === undefined) return
-        const modelId = modelIdInput.trim()
-        if (!VIRTUAL_ID_PATTERN.test(modelId)) {
-          ctx.ui.notify('Use letters, numbers, dots, dashes, or underscores for the model id.', 'error')
-          return
-        }
-        const draft: VirtualProviderConfig = {
-          id,
-          label: id,
-          models: [{ id: modelId, backends: [] }],
-        }
-        ctx.ui.notify('Add at least one backing provider model, then choose "Save and apply".', 'info')
-        if (await editVirtualProvider(ctx, draft)) {
-          ctx.ui.notify(`Created virtual provider "${id}". Select "${draft.models[0]!.id}" on provider "${id}" in /model.`, 'info')
-        }
-        return
-      }
-
-      const target = stored.find(candidate => row === `Edit ${candidate.id}` || row === `Delete ${candidate.id}`)
-      if (target === undefined) return
-      if (row.startsWith('Edit ')) {
-        const draft = structuredClone(target)
-        if (await editVirtualProvider(ctx, draft)) {
-          ctx.ui.notify(`Saved virtual provider "${draft.id}". Select "${draft.models[0]!.id}" on provider "${draft.id}" in /model.`, 'info')
-        }
-        return
-      }
-      if (row.startsWith('Delete ')) {
+      const existing = ref === '' ? undefined : stored.find(candidate => candidate.id.toLowerCase() === ref)
+      const outcome = await ctx.ui.custom<VirtualEditorOutcome>(
+        (_tui, theme, _keybindings, done) => new VirtualProviderEditorDialog({
+          theme,
+          stored,
+          candidates,
+          isProviderIdAvailable: id => !virtualProviders.has(id) && ctx.modelRegistry.getProvider(id) === undefined,
+          startDraft: existing === undefined ? undefined : structuredClone(existing),
+          done,
+        }),
+      )
+      if (outcome === undefined || outcome.kind === 'dismissed' || outcome.kind === 'discarded') return
+      if (outcome.kind === 'removed') {
         const confirmed = await ctx.ui.confirm(
           'Remove virtual provider?',
-          `Remove ${target.id}? Backing providers and their pooled accounts are untouched.`,
+          `Remove ${outcome.id}? Backing providers and their pooled accounts are untouched.`,
         )
         if (!confirmed) return
-        await store.removeVirtualProvider(target.id)
+        await store.removeVirtualProvider(outcome.id)
         await reconcile(ctx)
-        ctx.ui.notify(`Removed virtual provider "${target.id}".`, 'info')
+        ctx.ui.notify(`Removed virtual provider "${outcome.id}".`, 'info')
+        return
       }
+      await store.saveVirtualProvider(outcome.draft)
+      await reconcile(ctx)
+      const verb = stored.some(candidate => candidate.id === outcome.draft.id) ? 'Saved' : 'Created'
+      ctx.ui.notify(`${verb} virtual provider "${outcome.draft.id}". Select "${outcome.draft.models[0]!.id}" on provider "${outcome.draft.id}" in /model.`, 'info')
     },
   })
 }
