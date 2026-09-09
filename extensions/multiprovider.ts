@@ -1,8 +1,10 @@
 import type { Api, AuthType, Context, Credential, Model, Provider } from '@earendil-works/pi-ai'
-import type {
-  ExtensionAPI,
-  ExtensionContext,
+import {
+  DynamicBorder,
+  type ExtensionAPI,
+  type ExtensionContext,
 } from '@earendil-works/pi-coding-agent'
+import { Container, fuzzyFilter, Input, Text } from '@earendil-works/pi-tui'
 import {
   createManagedIntegration,
   createServiceAnnouncement,
@@ -34,6 +36,13 @@ import {
 
 type AnyIntegration = MultiProviderIntegration<Api, unknown>
 type VirtualBackendRef = import('../src/index.ts').VirtualBackend
+
+interface SearchableOption {
+  value: string
+  label: string
+  /** Extra text matched by the filter in addition to the label. */
+  searchText?: string
+}
 
 function isIntegration(value: unknown): value is AnyIntegration {
   if (typeof value !== 'object' || value === null) return false
@@ -356,6 +365,92 @@ export default function multiprovider(pi: ExtensionAPI): void {
     await refreshVirtual(ctx)
   }
 
+  // Fixed-height, type-to-filter selection dialog modeled on the core /model
+  // picker: an Input filters a scrolled list of rows with fuzzy matching, and
+  // the scheduler keybindings route up/down/enter/escape to the list while
+  // every other key feeds the filter.
+  const searchableSelect = async (
+    ctx: ExtensionContext,
+    title: string,
+    options: SearchableOption[],
+  ): Promise<string | undefined> => {
+    if (options.length === 0) return undefined
+    const maxVisible = 10
+    const result = await ctx.ui.custom<string | null>((tui, theme, keybindings, done) => {
+      let query = ''
+      let selectedIndex = 0
+      let filtered = options
+      const container = new Container()
+      container.addChild(new DynamicBorder(s => theme.fg('accent', s)))
+      container.addChild(new Text(theme.fg('accent', theme.bold(title)), 1, 0))
+      const searchInput = new Input({ placeholder: 'filter' })
+      searchInput.focused = true
+      container.addChild(searchInput)
+      const listContainer = new Container()
+      container.addChild(listContainer)
+      container.addChild(new Text(theme.fg('dim', 'type to filter · ↑↓ select · enter confirm · esc cancel'), 1, 0))
+      container.addChild(new DynamicBorder(s => theme.fg('accent', s)))
+
+      const updateList = () => {
+        listContainer.clear()
+        if (filtered.length === 0) {
+          listContainer.addChild(new Text(theme.fg('muted', '  No matches'), 0, 0))
+          return
+        }
+        const startIndex = Math.max(0, Math.min(
+          selectedIndex - Math.floor(maxVisible / 2),
+          filtered.length - maxVisible,
+        ))
+        const endIndex = Math.min(startIndex + maxVisible, filtered.length)
+        for (let index = startIndex; index < endIndex; index++) {
+          const option = filtered[index]!
+          const cursor = index === selectedIndex ? theme.fg('accent', '→ ') : '  '
+          listContainer.addChild(new Text(cursor + option.label, 0, 0))
+        }
+        if (startIndex > 0 || endIndex < filtered.length) {
+          listContainer.addChild(new Text(theme.fg('muted', `  (${selectedIndex + 1}/${filtered.length})`), 0, 0))
+        }
+      }
+
+      const refilter = () => {
+        const needle = query.trim()
+        filtered = needle === '' ? options : fuzzyFilter(options, needle, option => option.searchText ?? option.label)
+        selectedIndex = Math.min(selectedIndex, Math.max(0, filtered.length - 1))
+        updateList()
+      }
+
+      updateList()
+      return {
+        render: width => container.render(width),
+        invalidate: () => container.invalidate(),
+        handleInput: data => {
+          if (keybindings.matches(data, 'tui.select.up')) {
+            if (filtered.length > 0) selectedIndex = (selectedIndex - 1 + filtered.length) % filtered.length
+          } else if (keybindings.matches(data, 'tui.select.down')) {
+            if (filtered.length > 0) selectedIndex = (selectedIndex + 1) % filtered.length
+          } else if (keybindings.matches(data, 'tui.select.confirm')) {
+            const option = filtered[selectedIndex]
+            if (option !== undefined) done(option.value)
+            return
+          } else if (keybindings.matches(data, 'tui.select.cancel')) {
+            done(null)
+            return
+          } else {
+            searchInput.handleInput(data)
+            const next = searchInput.getValue()
+            if (next !== query) {
+              query = next
+              refilter()
+            }
+          }
+          updateList()
+          tui.requestRender()
+        },
+      }
+    })
+    return result ?? undefined
+  }
+
   // Interactive editor for a virtual provider draft. The UI manages one
   // virtual model per provider; extra models (created programmatically) are
   // preserved untouched through saves.
@@ -367,7 +462,6 @@ export default function multiprovider(pi: ExtensionAPI): void {
     while (true) {
       const rows: string[] = [
         `Model id: ${model.id}`,
-        `Model label: ${model.label ?? model.id}`,
         'Add backing provider model',
         ...model.backends.map((backend, backendIndex) =>
           `${backendIndex + 1}. ${backend.providerId} · ${backend.modelId}`
@@ -375,7 +469,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
         'Save and apply',
         'Discard changes',
       ]
-      const selected = await ctx.ui.select(`Virtual provider "${draft.id}" (${draft.label}):`, rows)
+      const selected = await ctx.ui.select(`Virtual provider "${draft.id}":`, rows)
       const rowIndex = rows.indexOf(selected ?? '')
       if (rowIndex < 0) return false
       const row = rows[rowIndex]!
@@ -402,11 +496,6 @@ export default function multiprovider(pi: ExtensionAPI): void {
         }
         continue
       }
-      if (row.startsWith('Model label: ')) {
-        const next = await ctx.ui.input('Display name for /model:', model.label ?? model.id)
-        if (next !== undefined && next.trim() !== '') model.label = next.trim()
-        continue
-      }
       if (row === 'Add backing provider model') {
         const candidates = uniqueProviders(ctx, baseProviders)
           .filter(provider => !virtualProviders.has(provider.id) && provider.getModels().length > 0)
@@ -414,15 +503,20 @@ export default function multiprovider(pi: ExtensionAPI): void {
           ctx.ui.notify('No registered providers expose models yet.', 'warning')
           continue
         }
-        const providerLabels = candidates.map(candidate => `${candidate.name} (${candidate.id})`)
-        const providerIndex = providerLabels.indexOf(await ctx.ui.select('Backing provider:', providerLabels) ?? '')
-        if (providerIndex < 0) continue
-        const chosen = candidates[providerIndex]!
+        const providerId = await searchableSelect(ctx, 'Backing provider:', candidates.map(candidate => ({
+          value: candidate.id,
+          label: `${candidate.name} (${candidate.id})`,
+        })))
+        const chosen = candidates.find(candidate => candidate.id === providerId)
+        if (chosen === undefined) continue
         const catalog = chosen.getModels()
-        const modelLabels = catalog.map(candidate => `${candidate.id} · ${candidate.name}`)
-        const modelIndex = modelLabels.indexOf(await ctx.ui.select(`Backing model for ${chosen.name}:`, modelLabels) ?? '')
-        if (modelIndex < 0) continue
-        const backingModel = catalog[modelIndex]!
+        const modelId = await searchableSelect(ctx, `Backing model for ${chosen.name}:`, catalog.map(candidate => ({
+          value: candidate.id,
+          label: `${candidate.id} · ${candidate.name}`,
+          searchText: `${candidate.id} ${candidate.name}`,
+        })))
+        const backingModel = catalog.find(candidate => candidate.id === modelId)
+        if (backingModel === undefined) continue
         if (model.backends.some(backend =>
           backend.providerId === chosen.id && backend.modelId === backingModel.id)) {
           ctx.ui.notify('That provider model is already a backend.', 'warning')
@@ -839,8 +933,8 @@ export default function multiprovider(pi: ExtensionAPI): void {
 
       const rows = [
         'Create new virtual provider',
-        ...stored.map(candidate => `Edit ${candidate.label} (${candidate.id})`),
-        ...stored.map(candidate => `Delete ${candidate.label} (${candidate.id})`),
+        ...stored.map(candidate => `Edit ${candidate.id}`),
+        ...stored.map(candidate => `Delete ${candidate.id}`),
       ]
       const selected = await ctx.ui.select('Virtual providers:', rows)
       const index = rows.indexOf(selected ?? '')
@@ -856,9 +950,6 @@ export default function multiprovider(pi: ExtensionAPI): void {
           ctx.ui.notify('Provider id is invalid or already registered.', 'error')
           return
         }
-        const labelInput = await ctx.ui.input('Display name:', id)
-        if (labelInput === undefined) return
-        const label = labelInput.trim() || id
         const modelIdInput = await ctx.ui.input('Virtual model id (shown in /model):', id)
         if (modelIdInput === undefined) return
         const modelId = modelIdInput.trim()
@@ -868,7 +959,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
         }
         const draft: VirtualProviderConfig = {
           id,
-          label,
+          label: id,
           models: [{ id: modelId, backends: [] }],
         }
         ctx.ui.notify('Add at least one backing provider model, then choose "Save and apply".', 'info')
@@ -878,7 +969,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
         return
       }
 
-      const target = stored.find(candidate => row.endsWith(`(${candidate.id})`))
+      const target = stored.find(candidate => row === `Edit ${candidate.id}` || row === `Delete ${candidate.id}`)
       if (target === undefined) return
       if (row.startsWith('Edit ')) {
         const draft = structuredClone(target)
@@ -890,7 +981,7 @@ export default function multiprovider(pi: ExtensionAPI): void {
       if (row.startsWith('Delete ')) {
         const confirmed = await ctx.ui.confirm(
           'Remove virtual provider?',
-          `Remove ${target.label} (${target.id})? Backing providers and their pooled accounts are untouched.`,
+          `Remove ${target.id}? Backing providers and their pooled accounts are untouched.`,
         )
         if (!confirmed) return
         await store.removeVirtualProvider(target.id)

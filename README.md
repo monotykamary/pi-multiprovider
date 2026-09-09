@@ -124,8 +124,8 @@ A virtual provider maps **one model to multiple provider models**. Sessions are 
 
 Create one with `/vprovider`:
 
-1. Choose **Create new virtual provider**, then set the provider id, display name, and virtual model id.
-2. Add one or more **backing provider models**—pick any registered provider and one of its models. Toggle, reweight, or remove backends at any time.
+1. Choose **Create new virtual provider**, then set the provider id and virtual model id.
+2. Add one or more **backing provider models**—pick any registered provider and one of its models from a fixed-height, type-to-filter list. Toggle, reweight, or remove backends at any time.
 3. **Save and apply**. The virtual model appears in `/model` under the virtual provider's id.
 
 Behavior details:
