@@ -115,6 +115,7 @@ describe('MultiProviderService', () => {
 
   it('rotates evenly for providers registered without first-account bias', async () => {
     const service = new MultiProviderService({
+      randomInt: () => 0,
       randomId: (() => {
         let id = 0
         return () => `lease-${++id}`
@@ -124,11 +125,47 @@ describe('MultiProviderService', () => {
       id: 'example',
       label: 'Example',
       selectionBias: 'none',
-      accounts: () => accounts,
+      accounts: () => accounts.map(account => ({ ...account, weight: 1 })),
     })
     expect(await select(service)).toBe('a')
     expect(await select(service)).toBe('b')
     expect(await select(service)).toBe('a')
+  })
+
+  it('rotates unweighted pools in pool order starting at a random offset', async () => {
+    const service = new MultiProviderService({ affinity: false, randomInt: () => 1 })
+    service.registerProvider({
+      id: 'example',
+      label: 'Example',
+      selectionBias: 'none',
+      accounts: () => [
+        { id: 'zeta', label: 'Zeta', authKind: 'api-key', credentialRef: 'z', weight: 1 },
+        { id: 'alpha', label: 'Alpha', authKind: 'api-key', credentialRef: 'a', weight: 1 },
+        { id: 'mid', label: 'Mid', authKind: 'api-key', credentialRef: 'm', weight: 1 },
+      ],
+    })
+    // Offset 1 into pool order [zeta, alpha, mid], then plain rotation in
+    // pool order — never id order.
+    expect(await select(service)).toBe('alpha')
+    expect(await select(service)).toBe('mid')
+    expect(await select(service)).toBe('zeta')
+  })
+
+  it('honors differing weights under plain round-robin', async () => {
+    const service = new MultiProviderService({ affinity: false, randomInt: () => 0 })
+    service.registerProvider({
+      id: 'example',
+      label: 'Example',
+      selectionBias: 'none',
+      accounts: () => [
+        { id: 'a', label: 'Heavy', authKind: 'api-key', credentialRef: 'a', weight: 3 },
+        { id: 'b', label: 'Light', authKind: 'api-key', credentialRef: 'b', weight: 1 },
+      ],
+    })
+    const picks: string[] = []
+    for (let i = 0; i < 8; i++) picks.push(await select(service))
+    expect(picks.filter(id => id === 'a')).toHaveLength(6)
+    expect(picks.filter(id => id === 'b')).toHaveLength(2)
   })
 
   it('spills new sessions to the next account while the main account cools down', async () => {

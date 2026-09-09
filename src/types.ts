@@ -224,6 +224,7 @@ export interface SchedulerOptions {
   errorsBeforeSwitch?: number
   now?: () => number
   randomId?: () => string
+  randomInt?: (maxExclusive: number) => number
 }
 
 export interface AccountRequestContext<TApi extends Api = Api> {

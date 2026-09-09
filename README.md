@@ -110,12 +110,12 @@ Add as many accounts as you need from the same manager. Remove credentials from 
 
 | Strategy | Selection behavior | Good for |
 | --- | --- | --- |
-| **Round robin** | Starts at the first healthy account in pool order (the **main account**) and spills over to later accounts only while earlier ones are unavailable. | A primary subscription with backup accounts. |
+| **Round robin** | Starts at the first healthy account in pool order (the **main account**) and spills over to later accounts only while earlier ones are unavailable. Unbiased pools rotate through healthy accounts in pool order from a random starting account, and differing weights shape traffic shares. | A primary subscription with backup accounts. |
 | **Weighted round robin** | Uses smooth weighted scheduling. | Accounts with different quotas or spend limits. |
 | **Least in flight** | Selects the healthy account with the least active work. | Concurrent agents and uneven request duration. |
 | **Priority failover** | Uses the lowest-priority number until it becomes unhealthy. | Primary/backup credentials. |
 
-First-account bias keeps every new session on the account listed first in the pool—**Pi default (upstream)** when included, otherwise the first stored account—so you stop seeing sessions start on a backup account while the main one has plenty of usage. Integrations that want even request rotation register with `selectionBias: 'none'`, which restores the classic rotate-through-healthy-accounts behavior.
+First-account bias keeps every new session on the account listed first in the pool—**Pi default (upstream)** when included, otherwise the first stored account—so you stop seeing sessions start on a backup account while the main one has plenty of usage. Integrations that want even request rotation register with `selectionBias: 'none'`, which restores the classic rotate-through-healthy-accounts behavior: accounts rotate in pool order (the order they are configured, never re-sorted by id), the rotation starts at a random account so restarts do not favor the same one, and differing per-account weights share traffic smoothly instead of being ignored.
 
 Session affinity can pin a healthy account to the current Pi session. Explicit retry exclusions always win, so a rejected account is not selected twice for the same logical request. Switch strategies, affinity, and per-account weight and priority at any time inside `/multilogin`. `/switch-account` sets the pinned account explicitly for one session without touching these settings.
 

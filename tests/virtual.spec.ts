@@ -191,9 +191,10 @@ function harness(
       return handlers.b(model as Model<'test-api'>, requestContext, options)
     })],
   ])
-  const service = new MultiProviderService(
-    options.errorsBeforeSwitch === undefined ? {} : { errorsBeforeSwitch: options.errorsBeforeSwitch },
-  )
+  const service = new MultiProviderService({
+    randomInt: () => 0,
+    ...(options.errorsBeforeSwitch === undefined ? {} : { errorsBeforeSwitch: options.errorsBeforeSwitch }),
+  })
   for (const integration of createVirtualIntegrations(config)) {
     service.registerProvider(integration)
   }

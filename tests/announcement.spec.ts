@@ -45,6 +45,7 @@ function makeHarness(options: {
   }
   const scheduler = new MultiProviderService({
     ...(options.affinity === undefined ? {} : { affinity: options.affinity }),
+    randomInt: () => 1,
     randomId: () => 'lease-1',
   })
   scheduler.registerProvider({

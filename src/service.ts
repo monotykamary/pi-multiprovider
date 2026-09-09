@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import { NoAccountAvailableError, UnknownAccountError, UnknownProviderError } from './errors.ts'
 import { SCHEDULER_SETTING_KEYS } from './types.ts'
 import type {
@@ -102,9 +102,10 @@ export class MultiProviderService {
   private readonly explicitAffinity = new Map<string, Set<string>>()
   private readonly roundRobinCursor = new Map<string, number>()
   private readonly smoothScores = new Map<string, Map<string, number>>()
-  private readonly defaults: Required<Omit<SchedulerOptions, 'now' | 'randomId'>>
+  private readonly defaults: Required<Omit<SchedulerOptions, 'now' | 'randomId' | 'randomInt'>>
   private readonly now: () => number
   private readonly randomId: () => string
+  private readonly randomInt: (maxExclusive: number) => number
 
   constructor(options: SchedulerOptions = {}) {
     this.defaults = {
@@ -119,6 +120,7 @@ export class MultiProviderService {
     }
     this.now = options.now ?? Date.now
     this.randomId = options.randomId ?? randomUUID
+    this.randomInt = options.randomInt ?? ((maxExclusive: number) => randomInt(0, maxExclusive))
   }
 
   registerProvider<TCredentialRef>(registration: ProviderRegistration<TCredentialRef>): () => void {
@@ -424,24 +426,23 @@ export class MultiProviderService {
     policy: SelectionPolicy,
     accounts: EffectiveAccount[],
   ): EffectiveAccount {
-    const ordered = [...accounts].sort((left, right) =>
-      left.account.id.localeCompare(right.account.id),
-    )
+    // Every policy below follows pool (inventory) order — the order the
+    // operator configured — never a re-sort by account id.
     if (policy === 'least-inflight') {
-      return ordered.sort((left, right) =>
+      return [...accounts].sort((left, right) =>
         left.runtime.inFlight - right.runtime.inFlight
         || (left.runtime.lastSelectedAt ?? 0) - (right.runtime.lastSelectedAt ?? 0),
       )[0]!
     }
     if (policy === 'priority') {
-      return ordered.sort((left, right) =>
+      return [...accounts].sort((left, right) =>
         left.priority - right.priority
         || left.runtime.inFlight - right.runtime.inFlight
         || (left.runtime.lastSelectedAt ?? 0) - (right.runtime.lastSelectedAt ?? 0),
       )[0]!
     }
     if (policy === 'weighted-round-robin') {
-      return this.selectWeighted(providerId, ordered)
+      return this.selectWeighted(providerId, accounts)
     }
     // Plain round-robin. accounts preserves pool (inventory) order, so the
     // first entry is the operator's main account; bias keeps new sessions on
@@ -449,9 +450,20 @@ export class MultiProviderService {
     if ((this.selectionBias.get(providerId) ?? DEFAULT_SELECTION_BIAS) === 'first-account') {
       return accounts[0]!
     }
-    const cursor = this.roundRobinCursor.get(providerId) ?? 0
-    const selected = ordered[cursor % ordered.length]!
-    this.roundRobinCursor.set(providerId, (cursor + 1) % ordered.length)
+    // Differing weights rotate traffic shares even under this policy; equal
+    // (or unset) weights keep the classic even rotation.
+    if (accounts.some(item => item.weight !== accounts[0]!.weight)) {
+      return this.selectWeighted(providerId, accounts)
+    }
+    // The rotation cursor starts at a random offset so a fresh process does
+    // not always land its first session on the same backend.
+    let cursor = this.roundRobinCursor.get(providerId)
+    if (cursor === undefined) {
+      cursor = accounts.length > 1 ? this.randomInt(accounts.length) : 0
+      this.roundRobinCursor.set(providerId, cursor)
+    }
+    const selected = accounts[cursor % accounts.length]!
+    this.roundRobinCursor.set(providerId, (cursor + 1) % accounts.length)
     return selected
   }
 
