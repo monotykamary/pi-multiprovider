@@ -31,6 +31,7 @@ const modelA: Model<'test-api'> = {
   provider: 'prov-a',
   baseUrl: 'https://a.invalid',
   reasoning: false,
+  thinkingLevelMap: { high: 'high-effort', off: null },
   input: ['text'],
   cost: zeroCost,
   contextWindow: 1_000,
@@ -230,6 +231,7 @@ describe('virtual providers', () => {
       provider: 'pooled',
       api: 'test-api',
       baseUrl: 'https://a.invalid',
+      thinkingLevelMap: { high: 'high-effort', off: null },
       contextWindow: 1_000,
     })
   })

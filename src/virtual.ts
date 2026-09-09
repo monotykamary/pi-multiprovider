@@ -336,6 +336,9 @@ export function createVirtualProvider(dependencies: VirtualProviderDependencies)
       provider: config.id,
       baseUrl: template?.baseUrl ?? '',
       reasoning: template?.reasoning ?? false,
+      ...(template?.thinkingLevelMap === undefined
+        ? {}
+        : { thinkingLevelMap: template.thinkingLevelMap }),
       input: template?.input ?? ['text'],
       cost: template?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: template?.contextWindow ?? 128_000,
