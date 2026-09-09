@@ -56,6 +56,42 @@ describe('MultiProviderService', () => {
     expect(JSON.stringify(snapshot)).not.toContain('secret-personal')
   })
 
+  it('serves concurrent fresh-session requests from the main account without splitting them', async () => {
+    const service = scheduler()
+    // Two requests starting in the same tick of one new session: first-account
+    // bias sends both to the main account. No request fans out to a second
+    // account, and no rotation cursor splits concurrent session starts.
+    const [first, second] = await Promise.all([
+      service.acquire<string>({ providerId: 'example', affinityKey: 'session-1' }),
+      service.acquire<string>({ providerId: 'example', affinityKey: 'session-1' }),
+    ])
+    expect(first.accountId).toBe('a')
+    expect(second.accountId).toBe('a')
+    first.release({ status: 'success' })
+    second.release({ status: 'success' })
+
+    // Same guarantee with session affinity disabled: bias ignores the cursor.
+    const serviceNoAffinity = scheduler({ affinity: false })
+    const [third, fourth] = await Promise.all([
+      serviceNoAffinity.acquire<string>({ providerId: 'example' }),
+      serviceNoAffinity.acquire<string>({ providerId: 'example' }),
+    ])
+    expect(third.accountId).toBe('a')
+    expect(fourth.accountId).toBe('a')
+    third.release({ status: 'success' })
+    fourth.release({ status: 'success' })
+  })
+
+  it('re-pins a spilled session to the account that served it', async () => {
+    const service = scheduler()
+    // Main account unavailable (cooling/excluded): the session spills to the
+    // next account in pool order and then sticks to it for cache warmth.
+    expect(await select(service, { affinityKey: 'session-1', excludeAccountIds: ['a'] })).toBe('b')
+    expect(await select(service, { affinityKey: 'session-1' })).toBe('b')
+    // A different session still starts on the recovered main account.
+    expect(await select(service, { affinityKey: 'session-2' })).toBe('a')
+  })
+
   it('spills unpinned selection over in pool order and follows pool order over id order', async () => {
     const service = scheduler()
     expect(await select(service, { excludeAccountIds: ['a'] })).toBe('b')
