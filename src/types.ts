@@ -163,6 +163,22 @@ export type SchedulerSettingsPatch = {
   [K in keyof SchedulerSettings]?: SchedulerSettings[K] | undefined
 }
 
+// Host-facing metadata snapshot of a backing model, captured when the backend
+// is picked in /vprovider. Virtual models fall back to it while the backing
+// provider is not registered yet — pi snapshots enabled/resumed-session
+// models right after extension load, so thinking-level support and context
+// metadata must not depend on provider registration order.
+export interface VirtualModelTemplate {
+  api: Model<Api>['api']
+  baseUrl: string
+  reasoning: boolean
+  thinkingLevelMap?: Model<Api>['thinkingLevelMap']
+  input: Model<Api>['input']
+  cost: Model<Api>['cost']
+  contextWindow: number
+  maxTokens: number
+}
+
 // One backing (provider, model) pair inside a virtual provider. Virtual
 // backends are scheduler accounts; the credentialRef carries the pair.
 export interface VirtualBackend {
@@ -170,6 +186,7 @@ export interface VirtualBackend {
   modelId: string
   enabled?: boolean
   weight?: number
+  template?: VirtualModelTemplate
 }
 
 export interface VirtualModelConfig {

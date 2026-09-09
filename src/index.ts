@@ -5,8 +5,10 @@ export { liftProvider } from './lift.ts'
 export {
   BACKEND_UNAVAILABLE_PREFIX,
   VIRTUAL_ID_SEPARATOR,
+  captureVirtualModelTemplate,
   createVirtualIntegrations,
   createVirtualProvider,
+  healVirtualTemplates,
   virtualBackendAccountId,
   virtualSchedulerId,
   type AmbientAuthResolution,

@@ -142,6 +142,7 @@ Behavior details:
 - `/switch-account` works on virtual models too: pin the session to one backing provider model, or return to automatic rotation.
 - Virtual provider configs are stored (credential-free) in `multiprovider-auth.json` next to the account pools.
 - Mixing backends from different model families is allowed, but the virtual model advertises the first healthy backend's context window and pricing, and prompt caches never transfer between providers.
+- Virtual models capture each backing model's metadata (reasoning support, thinking-level map, context window, pricing) when you pick it, so `/thinking` and per-model thinking memory (pi-model-sort) work across restarts and session resume — even before backing providers register. Stored configs are healed automatically on the next session start.
 
 ## Switching accounts for one session
 

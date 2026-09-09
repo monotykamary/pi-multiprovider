@@ -19,6 +19,7 @@ import type {
   SelectionPolicy,
   VirtualBackend,
   VirtualModelConfig,
+  VirtualModelTemplate,
   VirtualProviderConfig,
 } from './types.ts'
 
@@ -154,6 +155,62 @@ function assertVirtualId(value: unknown, label: string): asserts value is string
   assertSafeKey(value, `virtual ${label}`)
 }
 
+function normalizeVirtualTemplate(value: unknown, backendLabel: string): VirtualModelTemplate | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'object' || value === null) {
+    throw new Error(`multiprovider: malformed template for ${backendLabel}`)
+  }
+  const malformed = () => new Error(`multiprovider: malformed template for ${backendLabel}`)
+  const candidate = value as Partial<VirtualModelTemplate>
+  const input = candidate.input as unknown
+  if (
+    typeof candidate.api !== 'string' || candidate.api === ''
+    || typeof candidate.baseUrl !== 'string' || candidate.baseUrl === ''
+    || typeof candidate.reasoning !== 'boolean'
+    || !Array.isArray(input) || input.some(entry => typeof entry !== 'string')
+    || typeof candidate.cost !== 'object' || candidate.cost === null
+    || typeof candidate.contextWindow !== 'number' || !Number.isFinite(candidate.contextWindow)
+    || candidate.contextWindow <= 0
+    || typeof candidate.maxTokens !== 'number' || !Number.isFinite(candidate.maxTokens)
+    || candidate.maxTokens <= 0
+  ) throw malformed()
+  const cost = candidate.cost as Partial<Record<'input' | 'output' | 'cacheRead' | 'cacheWrite', unknown>> & { tiers?: unknown }
+  for (const field of ['input', 'output', 'cacheRead', 'cacheWrite'] as const) {
+    const rate = cost[field]
+    if (typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0) throw malformed()
+  }
+  let thinkingLevelMap: Record<string, string | null> | undefined
+  if (candidate.thinkingLevelMap !== undefined) {
+    if (typeof candidate.thinkingLevelMap !== 'object' || candidate.thinkingLevelMap === null) throw malformed()
+    thinkingLevelMap = {}
+    for (const [level, effort] of Object.entries(candidate.thinkingLevelMap)) {
+      if (typeof effort !== 'string' && effort !== null) throw malformed()
+      thinkingLevelMap[level] = effort
+    }
+  }
+  const rates = {
+    input: cost.input as number,
+    output: cost.output as number,
+    cacheRead: cost.cacheRead as number,
+    cacheWrite: cost.cacheWrite as number,
+  }
+  const tiers = Array.isArray(cost.tiers)
+    ? (cost.tiers as VirtualModelTemplate['cost']['tiers'])
+    : undefined
+  return {
+    api: candidate.api,
+    baseUrl: candidate.baseUrl,
+    reasoning: candidate.reasoning,
+    ...(thinkingLevelMap === undefined
+      ? {}
+      : { thinkingLevelMap: thinkingLevelMap as VirtualModelTemplate['thinkingLevelMap'] }),
+    input: input as VirtualModelTemplate['input'],
+    cost: tiers === undefined ? rates : { ...rates, tiers },
+    contextWindow: candidate.contextWindow,
+    maxTokens: candidate.maxTokens,
+  }
+}
+
 function normalizeVirtualProvider(value: unknown): VirtualProviderConfig {
   if (typeof value !== 'object' || value === null) {
     throw new Error('multiprovider: malformed virtual provider')
@@ -191,11 +248,16 @@ function normalizeVirtualProvider(value: unknown): VirtualProviderConfig {
         throw new Error(`multiprovider: duplicate backend "${key}" for virtual model "${model.id}"`)
       }
       seen.add(key)
+      const template = normalizeVirtualTemplate(
+        backend.template,
+        `virtual model "${model.id}" backend "${backend.providerId}/${backend.modelId}"`,
+      )
       return {
         providerId: backend.providerId,
         modelId: backend.modelId,
         ...(backend.enabled === undefined ? {} : { enabled: backend.enabled }),
         weight: normalizeWeight(backend.weight),
+        ...(template === undefined ? {} : { template }),
       }
     })
     return {

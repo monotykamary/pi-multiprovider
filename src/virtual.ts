@@ -27,6 +27,7 @@ import type {
   SelectionBias,
   VirtualBackend,
   VirtualModelConfig,
+  VirtualModelTemplate,
   VirtualProviderConfig,
 } from './types.ts'
 
@@ -355,6 +356,45 @@ function virtualStream<TApi extends Api>(
   })
 }
 
+// Snapshot the host-facing metadata a virtual model must advertise so pi can
+// clamp thinking levels and size context before the backing provider
+// registers (pi snapshots enabled/resumed-session models right after
+// extension load).
+export function captureVirtualModelTemplate(model: Model<Api>): VirtualModelTemplate {
+  return {
+    api: model.api,
+    baseUrl: model.baseUrl,
+    reasoning: model.reasoning,
+    ...(model.thinkingLevelMap === undefined ? {} : { thinkingLevelMap: model.thinkingLevelMap }),
+    input: [...model.input],
+    cost: { ...model.cost },
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+  }
+}
+
+// Fill in missing persisted templates from live backing models. Returns a
+// cloned config when anything was added, else undefined — callers persist the
+// healed config so the next extension load snapshots virtual models with
+// correct thinking metadata without waiting for an editor save.
+export function healVirtualTemplates(
+  config: VirtualProviderConfig,
+  resolveTemplate: (providerId: string, modelId: string) => VirtualModelTemplate | undefined,
+): VirtualProviderConfig | undefined {
+  let added = false
+  const models = config.models.map(model => ({
+    ...model,
+    backends: model.backends.map(backend => {
+      if (backend.enabled === false || backend.template !== undefined) return backend
+      const template = resolveTemplate(backend.providerId, backend.modelId)
+      if (template === undefined) return backend
+      added = true
+      return { ...backend, template }
+    }),
+  }))
+  return added ? { ...config, models } : undefined
+}
+
 export function createVirtualProvider(dependencies: VirtualProviderDependencies): Provider<Api> {
   const { config } = dependencies
 
@@ -371,20 +411,27 @@ export function createVirtualProvider(dependencies: VirtualProviderDependencies)
         break
       }
     }
+    // Live backings win. Before they register (extension load, when pi already
+    // snapshots enabled/resumed-session models), fall back to the template
+    // captured at backend-pick time so thinking support and context metadata
+    // do not depend on provider registration order.
+    const source: Model<Api> | VirtualModelTemplate | undefined = template
+      ?? model.backends.find(backend => backend.enabled !== false && backend.template !== undefined)
+        ?.template
     return {
       id: model.id,
       name: model.label ?? model.id,
-      api: template?.api ?? 'openai-completions',
+      api: source?.api ?? 'openai-completions',
       provider: config.id,
-      baseUrl: template?.baseUrl ?? '',
-      reasoning: template?.reasoning ?? false,
-      ...(template?.thinkingLevelMap === undefined
+      baseUrl: source?.baseUrl ?? '',
+      reasoning: source?.reasoning ?? false,
+      ...(source?.thinkingLevelMap === undefined
         ? {}
-        : { thinkingLevelMap: template.thinkingLevelMap }),
-      input: template?.input ?? ['text'],
-      cost: template?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: template?.contextWindow ?? 128_000,
-      maxTokens: template?.maxTokens ?? 8_192,
+        : { thinkingLevelMap: source.thinkingLevelMap }),
+      input: source?.input ?? ['text'],
+      cost: source?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: source?.contextWindow ?? 128_000,
+      maxTokens: source?.maxTokens ?? 8_192,
     }
   }
 

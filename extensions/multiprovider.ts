@@ -34,9 +34,12 @@ import {
   type PublicAccountSnapshot,
   type SchedulerSettingsPatch,
   type SelectionPolicy,
+  type VirtualModelTemplate,
   type VirtualProviderConfig,
+  captureVirtualModelTemplate,
   createVirtualIntegrations,
   createVirtualProvider,
+  healVirtualTemplates,
   virtualSchedulerId,
 } from '../src/index.ts'
 import { promptApiKeyCredential, probeSessionRuntime, selectLogin, showLoginDialog } from '../src/multilogin.ts'
@@ -287,6 +290,17 @@ class VirtualProviderEditorDialog extends Container {
             this.enterPage()
             return
           }
+          // Heal templates for backends stored before capture existed; live
+          // resolution still wins at runtime — this covers the snapshot taken
+          // before backing providers register.
+          for (const backend of model.backends) {
+            if (backend.enabled === false || backend.template !== undefined) continue
+            const candidate = this.candidates
+              .find(provider => provider.id === backend.providerId)
+              ?.getModels()
+              .find(item => item.id === backend.modelId)
+            if (candidate !== undefined) backend.template = captureVirtualModelTemplate(candidate)
+          }
           this.done({ kind: 'saved', draft: this.draft! })
         } else if (id === 'discard') {
           this.done({ kind: 'discarded' })
@@ -343,7 +357,14 @@ class VirtualProviderEditorDialog extends Container {
           this.enterPage()
           return
         }
-        model.backends.push({ providerId, modelId: chosen.id, weight: 1 })
+        model.backends.push({
+          providerId,
+          modelId: chosen.id,
+          weight: 1,
+          // Persisted so the virtual model advertises correct thinking support
+          // before backing providers register (pi snapshots models at load).
+          template: captureVirtualModelTemplate(chosen),
+        })
         this.goTo({ kind: 'menu' })
       },
       () => this.goTo({ kind: 'menu' }),
@@ -763,7 +784,27 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       }
     }
 
-    for (const config of stored) {
+    // Heals configs saved before backend templates were captured: once
+    // backing providers are registered (install ran), resolve live metadata
+    // and persist it so the next extension load snapshots virtual models with
+    // correct thinking support. Best-effort; failures retry next reconcile.
+    const resolveTemplate = (providerId: string, modelId: string): VirtualModelTemplate | undefined => {
+      const provider = installedProviders.get(providerId)
+        ?? baseProviders.get(providerId)
+        ?? currentContext?.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
+      const model = provider?.getModels().find(item => item.id === modelId)
+      return model === undefined ? undefined : captureVirtualModelTemplate(model)
+    }
+    for (const storedConfig of stored) {
+      const healed = healVirtualTemplates(storedConfig, resolveTemplate)
+      if (healed !== undefined) {
+        try {
+          await store.saveVirtualProvider(healed)
+        } catch {
+          // Template persistence is best-effort; live resolution still wins.
+        }
+      }
+      const config = healed ?? storedConfig
       const prior = virtualConfigs.get(config.id)
       if (prior !== undefined && JSON.stringify(prior) === JSON.stringify(config)) continue
       if (prior !== undefined) unregisterVirtualModels(prior)

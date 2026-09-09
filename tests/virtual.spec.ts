@@ -14,8 +14,10 @@ import {
 } from '@earendil-works/pi-ai'
 import { describe, expect, it } from 'vitest'
 import {
+  captureVirtualModelTemplate,
   createVirtualIntegrations,
   createVirtualProvider,
+  healVirtualTemplates,
   type FailoverInfo,
   MultiProviderService,
   virtualSchedulerId,
@@ -242,6 +244,106 @@ describe('virtual providers', () => {
       thinkingLevelMap: { high: 'high-effort', off: null },
       contextWindow: 1_000,
     })
+  })
+
+  it('falls back to the persisted backend template before backing providers register', () => {
+    const virtual = createVirtualProvider({
+      service: new MultiProviderService(),
+      config: {
+        id: 'pooled',
+        label: 'Pooled',
+        models: [{
+          id: 'ultra',
+          backends: [{
+            providerId: 'prov-a',
+            modelId: 'model-a',
+            template: { ...captureVirtualModelTemplate(modelA), reasoning: true },
+          }],
+        }],
+      },
+      // Mirrors extension load: no backing provider is registered yet when pi
+      // snapshots enabled/resumed-session models.
+      getBackingProvider: () => undefined,
+      getAffinityKey: () => 'session-1',
+      resolveAmbientAuth: async () => ({ ok: true }),
+    })
+    expect(virtual.getModels()[0]).toMatchObject({
+      id: 'ultra',
+      provider: 'pooled',
+      api: 'test-api',
+      baseUrl: 'https://a.invalid',
+      reasoning: true,
+      thinkingLevelMap: { high: 'high-effort', off: null },
+      contextWindow: 1_000,
+      maxTokens: 100,
+    })
+  })
+
+  it('prefers the live backing model over the persisted template', () => {
+    const virtual = createVirtualProvider({
+      service: new MultiProviderService(),
+      config: {
+        id: 'pooled',
+        label: 'Pooled',
+        models: [{
+          id: 'ultra',
+          backends: [{
+            providerId: 'prov-a',
+            modelId: 'model-a',
+            template: {
+              ...captureVirtualModelTemplate(modelA),
+              api: 'openai-completions',
+              baseUrl: 'https://stored.invalid',
+              reasoning: true,
+              contextWindow: 5_000,
+            },
+          }],
+        }],
+      },
+      getBackingProvider: providerId =>
+        providerId === 'prov-a' ? backend('prov-a', modelA, () => okStream('x')) : undefined,
+      getAffinityKey: () => 'session-1',
+      resolveAmbientAuth: async () => ({ ok: true }),
+    })
+    expect(virtual.getModels()[0]).toMatchObject({
+      api: 'test-api',
+      baseUrl: 'https://a.invalid',
+      reasoning: false,
+      thinkingLevelMap: { high: 'high-effort', off: null },
+      contextWindow: 1_000,
+    })
+  })
+
+  it('ignores persisted templates on disabled backends', () => {
+    const virtual = createVirtualProvider({
+      service: new MultiProviderService(),
+      config: {
+        id: 'pooled',
+        label: 'Pooled',
+        models: [{
+          id: 'ultra',
+          backends: [
+            { providerId: 'prov-a', modelId: 'model-a', enabled: false, template: { ...captureVirtualModelTemplate(modelA), reasoning: true } },
+            { providerId: 'prov-b', modelId: 'model-b' },
+          ],
+        }],
+      },
+      getBackingProvider: () => undefined,
+      getAffinityKey: () => 'session-1',
+      resolveAmbientAuth: async () => ({ ok: true }),
+    })
+    const model = virtual.getModels()[0]!
+    expect(model.reasoning).toBe(false)
+    expect(model.thinkingLevelMap).toBeUndefined()
+  })
+
+  it('heals stored configs by filling missing templates from live backings', () => {
+    const resolved = healVirtualTemplates(config, (providerId, modelId) =>
+      providerId === 'prov-a' && modelId === 'model-a' ? captureVirtualModelTemplate(modelA) : undefined)
+    expect(resolved).not.toBeUndefined()
+    expect(resolved?.models[0]?.backends[0]?.template).toEqual(captureVirtualModelTemplate(modelA))
+    expect(resolved?.models[0]?.backends[1]?.template).toBeUndefined()
+    expect(healVirtualTemplates(config, () => undefined)).toBeUndefined()
   })
 
   it('round-robins backends across sessions and delegates with backing model and ambient auth', async () => {

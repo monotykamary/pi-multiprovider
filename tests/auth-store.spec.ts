@@ -7,7 +7,7 @@ import {
   type OAuthCredential,
 } from '@earendil-works/pi-ai'
 import { afterEach, describe, expect, it } from 'vitest'
-import { MultiAuthStore } from '../src/index.ts'
+import { MultiAuthStore, type VirtualModelTemplate } from '../src/index.ts'
 
 const temporaryDirectories: string[] = []
 
@@ -47,6 +47,42 @@ const virtualConfig = {
 }
 
 describe('MultiAuthStore', () => {
+  it('persists virtual backend templates and rejects malformed ones', async () => {
+    const { store } = await storeFixture()
+    const template: VirtualModelTemplate = {
+      api: 'openai-completions',
+      baseUrl: 'https://a.invalid',
+      reasoning: true,
+      thinkingLevelMap: { high: 'high-effort', off: null },
+      input: ['text'],
+      cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 },
+      contextWindow: 1_000,
+      maxTokens: 100,
+    }
+    await store.saveVirtualProvider({
+      id: 'pooled',
+      label: 'Pooled',
+      models: [{
+        id: 'ultra',
+        backends: [{ providerId: 'prov-a', modelId: 'model-a', template }],
+      }],
+    })
+    const stored = await store.getVirtualProvider('pooled')
+    expect(stored?.models[0]?.backends[0]?.template).toEqual(template)
+    await expect(store.saveVirtualProvider({
+      id: 'pooled',
+      label: 'Pooled',
+      models: [{
+        id: 'ultra',
+        backends: [{
+          providerId: 'prov-a',
+          modelId: 'model-a',
+          template: { reasoning: true } as unknown as VirtualModelTemplate,
+        }],
+      }],
+    })).rejects.toThrow('malformed template')
+  })
+
   it('persists atomically with mode 0600 and never exposes credential values in public views', async () => {
     const { store } = await storeFixture()
     const first = await store.addAccount('example', {
