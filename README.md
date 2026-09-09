@@ -31,6 +31,7 @@ If an account fails before visible output, the lift can cool it down and retry a
 | 🔐 | **Multiple credentials** | Store API keys and provider-native OAuth credentials per provider. |
 | 🪄 | **`/multilogin`** | Reuses Pi's searchable provider selector and login dialog, then opens a searchable settings-style pool manager for drilling into every row inline. |
 | 🔀 | **Four pool strategies** | Round robin, weighted round robin, least in flight, or priority failover. |
+| 🔃 | **`/switch-account`** | Ephemeral session pin to one pooled account for the current model—pool settings untouched. |
 | 🧬 | **Upstream merge** | Optionally treats Pi's normal `/login`, `auth.json`, environment, or ambient credential as another account—editable inline like any stored account. |
 | 🩺 | **Health-aware leases** | Tracks in-flight work, failures, cooldowns, session affinity, and retry exclusions. |
 | 🛡️ | **Stream-safe failover** | Suppresses a rejected attempt's start/error events and retries only before user-visible output. |
@@ -101,6 +102,7 @@ Add as many accounts as you need from the same manager. Remove credentials from 
 | `/multilogin [provider]` | Open the pool manager: strategy, affinity, upstream, account, and scheduler settings, plus adding or removing accounts. |
 | `/multilogout [provider]` | Remove an account saved by `/multilogin`. |
 | `/accounts` | Inspect pool policy, account status, in-flight leases, failures, and cooldowns. |
+| `/switch-account [label]` | Pin this session to one pooled account of the current model's provider, or return to automatic selection. |
 
 ## Pool strategies
 
@@ -111,7 +113,19 @@ Add as many accounts as you need from the same manager. Remove credentials from 
 | **Least in flight** | Selects the healthy account with the least active work. | Concurrent agents and uneven request duration. |
 | **Priority failover** | Uses the lowest-priority number until it becomes unhealthy. | Primary/backup credentials. |
 
-Session affinity can pin a healthy account to the current Pi session. Explicit retry exclusions always win, so a rejected account is not selected twice for the same logical request. Switch strategies, affinity, and per-account weight and priority at any time inside `/multilogin`.
+Session affinity can pin a healthy account to the current Pi session. Explicit retry exclusions always win, so a rejected account is not selected twice for the same logical request. Switch strategies, affinity, and per-account weight and priority at any time inside `/multilogin`. `/switch-account` sets the pinned account explicitly for one session without touching these settings.
+
+## Switching accounts for one session
+
+`/switch-account` lists every account pooled under the current model's provider—including **Pi default (upstream)** while its credential is configured—and pins the choice to the current Pi session:
+
+- The pin is session-scoped and ephemeral. Pool strategy, affinity, weights, and priorities stay untouched, and the pin resets when Pi restarts.
+- New requests from this session use the pinned account, even while the pool's session affinity is off.
+- If the pinned account cools down, another account serves temporarily and the session returns to it once it recovers. Removing or disabling the account drops the pin.
+- **Automatic**—or `/switch-account auto`—clears the pin so the pool strategy selects again.
+- `/switch-account work` switches directly when the label matches exactly or by unique prefix.
+
+In-flight requests keep their leased account; only new requests observe the switch.
 
 ## How auth merging works
 
@@ -163,7 +177,7 @@ The implementation was exercised against the actual sibling `pi-zro-provider` an
 | Second stored ZRO API key, no `ZRO_API_KEY` environment fallback | `ZRO_SECOND_OK` |
 | Priority-1 synthetic invalid key → priority-2 valid key, same `zro/deepseek-v4-flash-0731` stream | `ZRO_FAILOVER_OK` |
 
-The package also has direct Pi runtime probes and 21 deterministic tests covering scheduling, stream integrity, cancellation, secure storage, concurrent mutation, OAuth refresh locking, upstream auth scrubbing, upstream preference persistence, scheduler settings, pool-only availability, and simulated API-key/OAuth login flows.
+The package also has direct Pi runtime probes and 25 deterministic tests covering scheduling, session account pinning, stream integrity, cancellation, secure storage, concurrent mutation, OAuth refresh locking, upstream auth scrubbing, upstream preference persistence, scheduler settings, pool-only availability, and simulated API-key/OAuth login flows.
 
 ## Provider integration API
 
@@ -219,6 +233,7 @@ Current limits:
 - Deferred fetch/cancel operations are not lifted yet; `stream` and `streamSimple` are the supported failover paths.
 - A broken or revoked OAuth credential in Pi's primary `auth.json` can fail during Pi's pre-stream refresh before account selection. Run `/logout` for that provider or repair the primary login; extra pooled OAuth refreshes are independently isolated.
 - If both a stored pool and a provider-owned integration register for one ID, the stored pool wins and Pi displays a warning.
+- Provider-owned integrations with a custom `affinityKey` are invoked with a minimal context by `/switch-account`; keys that depend on request message history cannot be reproduced there and fall back to the Pi session id.
 
 ## Development
 

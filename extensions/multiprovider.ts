@@ -10,8 +10,10 @@ import {
   MULTIPROVIDER_REGISTER_EVENT,
   MultiAuthStore,
   MultiProviderService,
+  PI_UPSTREAM_ACCOUNT_ID,
   type MultiAuthUpstreamPreferences,
   type MultiProviderIntegration,
+  type PublicAccountSnapshot,
   type SchedulerSettingsPatch,
   type SelectionPolicy,
 } from '../src/index.ts'
@@ -58,6 +60,32 @@ function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot
   return lines
 }
 
+const AUTOMATIC_SWITCH_REFS = new Set(['auto', 'automatic'])
+
+function switchAccountLabel(account: PublicAccountSnapshot, current: boolean): string {
+  const kind = account.id === PI_UPSTREAM_ACCOUNT_ID ? 'upstream' : account.authKind
+  const status = account.status === 'cooldown' && account.cooldownUntil !== undefined
+    ? `cooldown until ${new Date(account.cooldownUntil).toLocaleTimeString()}`
+    : account.status
+  return [
+    `${account.label} (${kind})`,
+    status,
+    `w${account.weight} · p${account.priority}`,
+    ...(current ? ['current'] : []),
+  ].join(' · ')
+}
+
+function switchAccountLabels(
+  accounts: readonly PublicAccountSnapshot[],
+  currentId: string | undefined,
+): string[] {
+  const labels = accounts.map(account => switchAccountLabel(account, account.id === currentId))
+  const counts = new Map<string, number>()
+  for (const label of labels) counts.set(label, (counts.get(label) ?? 0) + 1)
+  return labels.map((label, index) =>
+    (counts.get(label) ?? 0) > 1 ? `${label} · ${accounts[index]!.id.slice(0, 8)}` : label)
+}
+
 function uniqueProviders(
   ctx: ExtensionContext,
   baseProviders: ReadonlyMap<string, Provider<Api>>,
@@ -98,6 +126,28 @@ export default function multiprovider(pi: ExtensionAPI): void {
       )
     }
     return managed ?? external
+  }
+
+  // Mirrors the affinity key the lifted provider computes for each stream: the
+  // integration's own key when defined, otherwise the Pi session id. Custom
+  // keys are invoked with a minimal context, so keys derived from request
+  // message history cannot be reproduced here and fall back to the session id.
+  const sessionAffinityKey = (
+    integration: AnyIntegration,
+    ctx: ExtensionContext,
+    model: NonNullable<ExtensionContext['model']>,
+    providerId: string,
+  ): string => {
+    const fallback = ctx.sessionManager.getSessionId()
+    if (integration.affinityKey === undefined) return fallback
+    const provider = baseProviders.get(providerId)
+      ?? ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
+    if (provider === undefined) return fallback
+    try {
+      return integration.affinityKey({ provider, model, context: { messages: [] } }) ?? fallback
+    } catch {
+      return fallback
+    }
   }
 
   const restoreProvider = (providerId: string, ctx?: ExtensionContext): void => {
@@ -433,6 +483,110 @@ export default function multiprovider(pi: ExtensionAPI): void {
         return
       }
       await ctx.ui.select('Provider Accounts', statusLines(snapshot))
+    },
+  })
+
+  pi.registerCommand('switch-account', {
+    description: 'Switch the pooled account used by the current model for this session',
+    handler: async (args, ctx) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify('/switch-account requires Pi interactive mode.', 'warning')
+        return
+      }
+      await reconcile(ctx)
+      const model = ctx.model
+      if (model === undefined) {
+        ctx.ui.notify('No model is selected.', 'info')
+        return
+      }
+      const providerId = model.provider
+      const providerName = ctx.modelRegistry.getProvider(providerId)?.name ?? providerId
+      const integration = effectiveIntegration(providerId)
+      const pool = integration === undefined
+        ? undefined
+        : (await service.snapshot()).providers.find(candidate => candidate.id === providerId)
+      const accounts = pool?.accounts ?? []
+      if (integration === undefined || pool === undefined || accounts.length === 0) {
+        ctx.ui.notify(`${providerName} has no pooled accounts. Use /multilogin to add one.`, 'info')
+        return
+      }
+      // The upstream account is excluded from attempts while Pi has no
+      // credential configured for it, so pinning it then would never apply.
+      const upstreamConfigured = probeSessionRuntime(ctx)
+        ?.getProviderAuthStatus(providerId)?.configured !== false
+      const switchable = accounts.filter(account =>
+        account.id !== PI_UPSTREAM_ACCOUNT_ID || upstreamConfigured)
+      if (switchable.length === 0) {
+        ctx.ui.notify(`No switchable accounts for ${providerName}. Use /multilogin to add one.`, 'info')
+        return
+      }
+
+      const affinityKey = sessionAffinityKey(integration, ctx, model, providerId)
+      const pin = service.getAffinity(providerId, affinityKey)
+      const currentId = pin !== undefined && (pool.affinity || pin.explicit)
+        ? pin.accountId
+        : undefined
+
+      const ref = args.trim()
+      let automatic = false
+      let chosen: PublicAccountSnapshot | undefined
+      if (ref !== '') {
+        const normalized = ref.toLowerCase()
+        let matches = switchable.filter(account => account.label.toLowerCase() === normalized)
+        if (matches.length === 0) {
+          matches = switchable.filter(account => account.label.toLowerCase().startsWith(normalized))
+        }
+        if (matches.length === 1) chosen = matches[0]
+        else if (matches.length === 0 && AUTOMATIC_SWITCH_REFS.has(normalized)) automatic = true
+        else if (matches.length > 1) {
+          ctx.ui.notify(`Multiple accounts match "${ref}". Pick one below.`, 'warning')
+        } else {
+          ctx.ui.notify(`No pooled account for ${providerName} matches "${ref}". Pick one below.`, 'warning')
+        }
+      }
+
+      if (!automatic && chosen === undefined) {
+        const labels = [
+          `Automatic · let the ${pool.policy} strategy pick the next account`,
+          ...switchAccountLabels(switchable, currentId),
+        ]
+        const selected = await ctx.ui.select(`Switch ${providerName} account:`, labels)
+        const index = labels.indexOf(selected ?? '')
+        if (index < 0) return
+        if (index === 0) automatic = true
+        else chosen = switchable[index - 1]
+      }
+
+      if (automatic) {
+        service.clearAffinity(providerId, affinityKey)
+        ctx.ui.notify(
+          pool.affinity
+            ? "Cleared this session's pinned account. The next request re-selects using the pool strategy."
+            : 'Selection for this session is already automatic.',
+          'info',
+        )
+        return
+      }
+
+      const account = chosen
+      if (account === undefined) return
+      if (!account.enabled) {
+        ctx.ui.notify(`Account "${account.label}" is disabled. Enable it in /multilogin first.`, 'error')
+        return
+      }
+      try {
+        await service.pinAccount(providerId, affinityKey, account.id)
+      } catch (error) {
+        ctx.ui.notify(`Could not switch account: ${errorText(error)}`, 'error')
+        return
+      }
+      const cooldown = account.cooldownUntil === undefined
+        ? ''
+        : ` It cools down until ${new Date(account.cooldownUntil).toLocaleTimeString()}; other accounts serve until it recovers.`
+      ctx.ui.notify(
+        `Switched to ${account.label} for this session. Pool settings are unchanged; new requests from this session use it.${cooldown}`,
+        'info',
+      )
     },
   })
 }

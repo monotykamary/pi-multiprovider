@@ -5,6 +5,7 @@ import {
   type ProviderAccount,
   type ProviderAttemptFailure,
   SCHEDULER_DEFAULTS,
+  UnknownAccountError,
 } from '../src/index.ts'
 
 const accounts: ProviderAccount<string>[] = [
@@ -141,5 +142,60 @@ describe('MultiProviderService', () => {
     expect(account?.cooldownUntil).toBe(1_250)
     expect(SCHEDULER_DEFAULTS.rateLimitCooldownMs).toBe(60_000)
     expect(() => service.updateSchedulerDefaults({ rateLimitCooldownMs: -1 })).toThrow('non-negative')
+  })
+
+  it('pins an explicit session account that survives exclusions and cooldowns', async () => {
+    let now = 1_000
+    const service = scheduler({ now: () => now })
+    await service.pinAccount('example', 'session-1', 'b')
+    expect(service.getAffinity('example', 'session-1')).toEqual({ accountId: 'b', explicit: true })
+    expect(await select(service, { affinityKey: 'session-1' })).toBe('b')
+    // Retry exclusions within a logical request fall back without stealing the pin.
+    expect(await select(service, { affinityKey: 'session-1', excludeAccountIds: ['b'] })).toBe('a')
+    expect(service.getAffinity('example', 'session-1')?.accountId).toBe('b')
+    // A cooldown falls back temporarily, then the session returns to the pin.
+    const lease = await service.acquire({ providerId: 'example', affinityKey: 'session-1' })
+    expect(lease.accountId).toBe('b')
+    lease.release({ status: 'failure', error: failure(429) })
+    now = 30_000
+    expect(await select(service, { affinityKey: 'session-1' })).toBe('a')
+    expect(service.getAffinity('example', 'session-1')).toEqual({ accountId: 'b', explicit: true })
+    now = 61_000
+    expect(await select(service, { affinityKey: 'session-1' })).toBe('b')
+  })
+
+  it('honors explicit session pins even when pool affinity is off', async () => {
+    const service = scheduler({ affinity: false })
+    expect(service.getPoolPreference('example').affinity).toBe(false)
+    expect(await select(service, { affinityKey: 'session-1' })).toBe('a')
+    expect(service.getAffinity('example', 'session-1')).toBeUndefined()
+    await service.pinAccount('example', 'session-1', 'b')
+    expect(await select(service, { affinityKey: 'session-1' })).toBe('b')
+    expect(await select(service, { affinityKey: 'session-1' })).toBe('b')
+    expect(service.getPoolPreference('example').affinity).toBe(false)
+  })
+
+  it('validates pin targets and drops pins for disabled accounts', async () => {
+    const service = scheduler()
+    await expect(service.pinAccount('example', 'session-1', 'missing'))
+      .rejects.toBeInstanceOf(UnknownAccountError)
+    await service.pinAccount('example', 'session-1', 'a')
+    await service.updatePool('example', {
+      accounts: [{ accountId: 'a', enabled: false, weight: 1, priority: 0 }],
+    })
+    await expect(service.pinAccount('example', 'session-1', 'a')).rejects.toThrow('disabled')
+    expect(await select(service, { affinityKey: 'session-1' })).toBe('b')
+    expect(service.getAffinity('example', 'session-1')).toEqual({ accountId: 'b', explicit: false })
+  })
+
+  it('clears explicit session pins on demand', async () => {
+    const service = scheduler()
+    await service.pinAccount('example', 'session-1', 'b')
+    service.clearAffinity('example', 'session-1')
+    expect(service.getAffinity('example', 'session-1')).toBeUndefined()
+    expect(await select(service, { affinityKey: 'session-1' })).toBe('a')
+    expect(service.getAffinity('example', 'session-1')).toEqual({ accountId: 'a', explicit: false })
+    service.clearAffinity()
+    expect(service.getAffinity('example', 'session-1')).toBeUndefined()
   })
 })

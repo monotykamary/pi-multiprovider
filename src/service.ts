@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
-import { NoAccountAvailableError, UnknownProviderError } from './errors.ts'
+import { NoAccountAvailableError, UnknownAccountError, UnknownProviderError } from './errors.ts'
 import { SCHEDULER_SETTING_KEYS } from './types.ts'
 import type {
   AccountLease,
   AccountPreference,
   AcquireOptions,
+  AffinityPin,
   FailureDisposition,
   FailureKind,
   LeaseOutcome,
@@ -89,6 +90,7 @@ export class MultiProviderService {
   private readonly preferences = new Map<string, PoolPreference>()
   private readonly runtime = new Map<string, RuntimeState>()
   private readonly affinity = new Map<string, Map<string, string>>()
+  private readonly explicitAffinity = new Map<string, Set<string>>()
   private readonly roundRobinCursor = new Map<string, number>()
   private readonly smoothScores = new Map<string, Map<string, number>>()
   private readonly defaults: Required<Omit<SchedulerOptions, 'now' | 'randomId'>>
@@ -119,6 +121,7 @@ export class MultiProviderService {
       if (this.providers.get(registration.id) !== registration) return
       this.providers.delete(registration.id)
       this.affinity.delete(registration.id)
+      this.explicitAffinity.delete(registration.id)
       this.roundRobinCursor.delete(registration.id)
       this.smoothScores.delete(registration.id)
     }
@@ -155,13 +158,29 @@ export class MultiProviderService {
     }
 
     let selected: EffectiveAccount | undefined
-    if (pool.affinity && options.affinityKey !== undefined) {
-      const pinned = this.affinity.get(options.providerId)?.get(options.affinityKey)
-      selected = available.find(item => item.account.id === pinned)
+    let pinnedId: string | undefined
+    let explicitPin = false
+    if (options.affinityKey !== undefined) {
+      pinnedId = this.affinity.get(options.providerId)?.get(options.affinityKey)
+      explicitPin = pinnedId !== undefined
+        && this.explicitAffinity.get(options.providerId)?.has(options.affinityKey) === true
+      if (explicitPin && !accounts.some(item => item.account.id === pinnedId && item.enabled)) {
+        // The explicitly pinned account was removed or disabled: drop the pin
+        // and fall back to automatic selection for the rest of the session.
+        this.affinity.get(options.providerId)?.delete(options.affinityKey)
+        this.explicitAffinity.get(options.providerId)?.delete(options.affinityKey)
+        pinnedId = undefined
+        explicitPin = false
+      }
+      // Explicit pins override the pool's affinity setting; implicit pins only
+      // apply while the operator left session affinity enabled.
+      if ((pool.affinity || explicitPin) && pinnedId !== undefined) {
+        selected = available.find(item => item.account.id === pinnedId)
+      }
     }
     selected ??= this.select(options.providerId, pool.policy, available)
 
-    if (pool.affinity && options.affinityKey !== undefined) {
+    if (options.affinityKey !== undefined && pool.affinity && !explicitPin) {
       let table = this.affinity.get(options.providerId)
       if (table === undefined) {
         table = new Map()
@@ -275,15 +294,52 @@ export class MultiProviderService {
     delete runtime.lastFailureKind
   }
 
+  async pinAccount(providerId: string, affinityKey: string, accountId: string): Promise<void> {
+    const registration = this.registration(providerId)
+    const pool = this.pool(providerId)
+    const accounts = await this.effectiveAccounts(registration, pool)
+    const target = accounts.find(item => item.account.id === accountId)
+    if (target === undefined) throw new UnknownAccountError(providerId, accountId)
+    if (!target.enabled) {
+      throw new Error(`multiprovider: account "${target.account.label}" is disabled`)
+    }
+    let table = this.affinity.get(providerId)
+    if (table === undefined) {
+      table = new Map()
+      this.affinity.set(providerId, table)
+    }
+    table.set(affinityKey, accountId)
+    let explicit = this.explicitAffinity.get(providerId)
+    if (explicit === undefined) {
+      explicit = new Set()
+      this.explicitAffinity.set(providerId, explicit)
+    }
+    explicit.add(affinityKey)
+  }
+
+  getAffinity(providerId: string, affinityKey: string): AffinityPin | undefined {
+    this.registration(providerId)
+    const accountId = this.affinity.get(providerId)?.get(affinityKey)
+    if (accountId === undefined) return undefined
+    return {
+      accountId,
+      explicit: this.explicitAffinity.get(providerId)?.has(affinityKey) === true,
+    }
+  }
+
   clearAffinity(providerId?: string, affinityKey?: string): void {
     if (providerId === undefined) {
       this.affinity.clear()
+      this.explicitAffinity.clear()
       return
     }
-    const table = this.affinity.get(providerId)
-    if (table === undefined) return
-    if (affinityKey === undefined) this.affinity.delete(providerId)
-    else table.delete(affinityKey)
+    if (affinityKey === undefined) {
+      this.affinity.delete(providerId)
+      this.explicitAffinity.delete(providerId)
+      return
+    }
+    this.affinity.get(providerId)?.delete(affinityKey)
+    this.explicitAffinity.get(providerId)?.delete(affinityKey)
   }
 
   private registration(providerId: string): ProviderRegistration {

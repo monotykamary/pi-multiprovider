@@ -5,6 +5,16 @@ export class UnknownProviderError extends Error {
   }
 }
 
+export class UnknownAccountError extends Error {
+  constructor(
+    readonly providerId: string,
+    readonly accountId: string,
+  ) {
+    super(`multiprovider: provider "${providerId}" has no account "${accountId}"`)
+    this.name = 'UnknownAccountError'
+  }
+}
+
 export class NoAccountAvailableError extends Error {
   constructor(
     readonly providerId: string,

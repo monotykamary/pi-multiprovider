@@ -64,6 +64,14 @@ export interface PoolPreference {
   accounts: AccountPreference[]
 }
 
+// A session's pinned account. Explicit pins are set through pinAccount() and
+// override the pool's affinity setting until cleared; implicit pins are the
+// scheduler's own stickiness while pool affinity is enabled.
+export interface AffinityPin {
+  accountId: string
+  explicit: boolean
+}
+
 export interface AcquireOptions {
   providerId: string
   affinityKey?: string
