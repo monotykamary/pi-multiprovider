@@ -157,6 +157,7 @@ class VirtualProviderEditorDialog extends Container {
       hint: text => this.theme.fg('muted', text),
     }
     this.addChild(new DynamicBorder(s => this.theme.fg('border', s)))
+    this.addChild(new Spacer(1))
     this.addChild(this.pageContainer)
     this.addChild(new DynamicBorder(s => this.theme.fg('border', s)))
     this.enterPage()
@@ -261,8 +262,8 @@ class VirtualProviderEditorDialog extends Container {
       this.separatorItem('sep-top'),
       ...model.backends.map((backend, index) => this.menuItem(
         `backend-${index}`,
-        `${index + 1}. ${backend.providerId} · ${backend.modelId}`
-          + ` · ${backend.enabled === false ? 'disabled' : 'enabled'} · w${backend.weight ?? 1}`,
+        `${index + 1}. ${backend.providerId}`
+          + this.theme.fg('dim', ` · ${backend.modelId} · ${backend.enabled === false ? 'disabled' : 'enabled'} · w${backend.weight ?? 1}`),
       )),
       this.separatorItem('sep-bottom'),
       this.menuItem('save', 'Save and apply'),
