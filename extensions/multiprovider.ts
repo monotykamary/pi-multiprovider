@@ -410,6 +410,10 @@ class VirtualProviderEditorDialog extends Container {
     input.onEscape = () => this.goTo(this.inputBackPage)
     this.activeInput = input
     this.pageContainer.addChild(input)
+    // Pages without a SettingsList footer (the list pages get one from
+    // addHintLine) need a trailing blank row so the input does not sit
+    // flush against the bottom border.
+    this.pageContainer.addChild(new Spacer(1))
   }
 
   private applyInput(purpose: 'provider-id' | 'model-id' | 'weight', raw: string): void {
