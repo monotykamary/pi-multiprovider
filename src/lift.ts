@@ -146,6 +146,7 @@ function liftedStream<TApi extends Api, TCredentialRef>(
         try {
           lease = await service.acquire<TCredentialRef>({
             providerId: provider.id,
+            modelId: model.id,
             ...(affinityKey === undefined ? {} : { affinityKey }),
             excludeAccountIds: attempted,
           })
