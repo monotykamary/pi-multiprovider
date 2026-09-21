@@ -5,10 +5,12 @@ import type { Api, AuthType, Provider } from '@earendil-works/pi-ai'
 import type { ExtensionContext, Theme } from '@earendil-works/pi-coding-agent'
 import { Container, SettingsList, type SettingItem, Spacer, Text } from '@earendil-works/pi-tui'
 import {
+  type AccountUsageSnapshot,
   type MultiAuthAccount,
   type MultiAuthAccountSettings,
   type MultiAuthPoolSettings,
   type MultiAuthUpstreamPreferences,
+  PI_UPSTREAM_ACCOUNT_ID,
   SCHEDULER_DEFAULTS,
   SCHEDULER_SETTING_KEYS,
   type SchedulerSettings,
@@ -35,10 +37,12 @@ export interface PoolManagerState {
   poolExists: boolean
   policy: SelectionPolicy
   affinity: boolean
+  quotaAwareRouting: boolean
   includeUpstream: boolean
   upstream: MultiAuthUpstreamPreferences
   accounts: MultiAuthAccount[]
   scheduler: SchedulerSettings
+  usage: AccountUsageSnapshot[]
   upstreamConfigured?: boolean
   upstreamSource?: string
 }
@@ -48,6 +52,7 @@ export interface PoolManagerCallbacks {
   updatePool(settings: MultiAuthPoolSettings): Promise<void>
   updateAccount(accountId: string, settings: MultiAuthAccountSettings): Promise<void>
   removeAccount(accountId: string): Promise<void>
+  refreshUsage(accountId: string): Promise<void>
   updateScheduler(key: SchedulerSettingKey, valueMs: number | undefined): Promise<void>
 }
 
@@ -79,14 +84,91 @@ function upstreamLabel(state: PoolManagerState): string {
   return label === undefined || label === '' ? UPSTREAM_DEFAULT_LABEL : label
 }
 
-function upstreamSummary(state: PoolManagerState): string {
-  if (!state.includeUpstream) return 'disabled'
-  return `weight ${state.upstream.weight ?? 1} · priority ${state.upstream.priority ?? 0}`
+function usageFor(state: PoolManagerState, accountId: string): AccountUsageSnapshot | undefined {
+  return state.usage.find(snapshot => snapshot.accountId === accountId)
 }
 
-function accountSummary(account: MultiAuthAccount): string {
+function resetSummary(resetsAt: number | undefined): string | undefined {
+  if (resetsAt === undefined) return undefined
+  const remaining = resetsAt - Date.now()
+  if (remaining <= 0) return 'reset due'
+  if (remaining < 60_000) return 'resets <1m'
+  if (remaining < 3_600_000) return `resets ${Math.ceil(remaining / 60_000)}m`
+  if (remaining < 86_400_000) return `resets ${Math.ceil(remaining / 3_600_000)}h`
+  return `resets ${Math.ceil(remaining / 86_400_000)}d`
+}
+
+function usageWindowSummary(snapshot: AccountUsageSnapshot | undefined): string | undefined {
+  if (snapshot === undefined) return undefined
+  if (snapshot.status === 'unsupported') return 'usage unsupported'
+  if (snapshot.status === 'error') return 'usage error'
+  const window = snapshot.windows.find(candidate => candidate.active) ?? snapshot.windows[0]
+  if (window === undefined) return 'usage unavailable'
+  const amount = window.usedPercent === undefined
+    ? window.remaining === undefined ? window.label : `${window.remaining} left`
+    : `${Math.round(window.usedPercent)}% used`
+  return [amount, resetSummary(window.resetsAt), snapshot.status === 'stale' ? 'stale' : undefined]
+    .filter(part => part !== undefined)
+    .join(' · ')
+}
+
+function accountUsageDetails(snapshot: AccountUsageSnapshot | undefined): SettingItem[] {
+  if (snapshot === undefined) {
+    return [setting('usage.none', 'Usage', 'not loaded', {
+      description: 'Refresh to query this account without exposing its credential.',
+    })]
+  }
+  if (snapshot.windows.length === 0) {
+    return [setting('usage.status', 'Usage', snapshot.status, {
+      ...(snapshot.error === undefined ? {} : { description: snapshot.error }),
+    })]
+  }
+  return snapshot.windows.map((window, index) => {
+    const percent = window.usedPercent === undefined ? undefined : `${Math.round(window.usedPercent)}% used`
+    const amount = window.remaining !== undefined && window.limit !== undefined
+      ? `${window.remaining}/${window.limit} left`
+      : window.remaining === undefined ? undefined : `${window.remaining} left`
+    return setting(`usage.window.${index}`, window.label, [percent, amount, resetSummary(window.resetsAt)]
+      .filter(part => part !== undefined)
+      .join(' · ') || 'available', {
+      description: snapshot.status === 'stale' ? 'Cached value; the latest refresh failed.' : 'Latest provider-reported quota window.',
+    })
+  })
+}
+
+function refreshUsageRow(
+  theme: Theme,
+  accountId: string,
+  snapshot: AccountUsageSnapshot | undefined,
+): SettingItem {
+  return setting(`usage.${accountId}.refresh`, 'Refresh usage', snapshot === undefined ? 'not loaded' : snapshot.status, {
+    description: 'Query the provider now for this account only.',
+    submenu: (_currentValue, done) => new SelectSubmenu(
+      theme,
+      'Refresh usage?',
+      'This sends the account credential only to the provider usage endpoint.',
+      [{ value: 'refresh', label: 'Refresh now' }],
+      'refresh',
+      value => done(value),
+      () => done(),
+    ),
+  })
+}
+
+function upstreamSummary(state: PoolManagerState): string {
+  if (!state.includeUpstream) return 'disabled'
+  return [
+    `weight ${state.upstream.weight ?? 1} · priority ${state.upstream.priority ?? 0}`,
+    usageWindowSummary(usageFor(state, PI_UPSTREAM_ACCOUNT_ID)),
+  ].filter(part => part !== undefined).join(' · ')
+}
+
+function accountSummary(account: MultiAuthAccount, usage: AccountUsageSnapshot | undefined): string {
   if (!account.enabled) return 'disabled'
-  return `weight ${account.weight} · priority ${account.priority}`
+  return [
+    `weight ${account.weight} · priority ${account.priority}`,
+    usageWindowSummary(usage),
+  ].filter(part => part !== undefined).join(' · ')
 }
 
 function schedulerSummary(scheduler: SchedulerSettings): string {
@@ -192,6 +274,7 @@ function upstreamRow(
   persist: (id: string, value: string) => void,
 ): SettingItem {
   const label = upstreamLabel(state)
+  const usage = usageFor(state, PI_UPSTREAM_ACCOUNT_ID)
   return setting(
     'upstream',
     `${label} (upstream)`,
@@ -220,6 +303,8 @@ function upstreamRow(
             description: PRIORITY_DESCRIPTION,
             submenu: integerInputSubmenu(theme, 'Priority', PRIORITY_DESCRIPTION, 0),
           }),
+          ...accountUsageDetails(usage),
+          refreshUsageRow(theme, PI_UPSTREAM_ACCOUNT_ID, usage),
         ],
         persist,
       ),
@@ -229,10 +314,12 @@ function upstreamRow(
 
 function storedAccountRow(
   theme: Theme,
+  state: PoolManagerState,
   account: MultiAuthAccount,
   persist: (id: string, value: string) => void,
 ): SettingItem {
-  return setting(`stored.${account.id}`, account.label, accountSummary(account), {
+  const usage = usageFor(state, account.id)
+  return setting(`stored.${account.id}`, account.label, accountSummary(account, usage), {
     description: `${account.authKind} credential stored in multiprovider-auth.json.`,
     submenu: sectionSubmenu(
       theme,
@@ -255,6 +342,8 @@ function storedAccountRow(
           description: PRIORITY_DESCRIPTION,
           submenu: integerInputSubmenu(theme, 'Priority', PRIORITY_DESCRIPTION, 0),
         }),
+        ...accountUsageDetails(usage),
+        refreshUsageRow(theme, account.id, usage),
         setting(`account.${account.id}.remove`, 'Remove account', '', {
           description: 'Permanently deletes this stored credential.',
           submenu: (_currentValue, done) =>
@@ -298,7 +387,7 @@ function accountsSection(
 ): SettingItem {
   const rows: SettingItem[] = []
   if (state.poolExists || state.upstreamConfigured === true) rows.push(upstreamRow(theme, state, persist))
-  for (const account of state.accounts) rows.push(storedAccountRow(theme, account, persist))
+  for (const account of state.accounts) rows.push(storedAccountRow(theme, state, account, persist))
   if (rows.length === 0) {
     rows.push(setting('accounts.none', 'No accounts yet', '', {
       description: 'Use the Add account row below to store a credential for this pool.',
@@ -353,6 +442,10 @@ function buildView(
     }),
     setting('pool.affinity', 'Session affinity', state.affinity ? 'true' : 'false', {
       description: 'Keep a healthy account pinned to this session instead of re-selecting on every request.',
+      values: BOOLEANS,
+    }),
+    setting('pool.quota-aware', 'Quota-aware routing', state.quotaAwareRouting ? 'true' : 'false', {
+      description: 'When enabled, fresh 100%-used quotas temporarily remove that account until its known reset time.',
       values: BOOLEANS,
     }),
     accountsSection(theme, state, methods, provider, persist),
@@ -445,7 +538,7 @@ export class PoolManagerComponent extends Container {
 
 function selectAfterFor(id: string): string {
   const segments = id.split('.')
-  if (segments[0] === 'account' || segments[0] === 'upstream' || segments[0] === 'stored') return 'accounts'
+  if (segments[0] === 'account' || segments[0] === 'upstream' || segments[0] === 'stored' || segments[0] === 'usage') return 'accounts'
   return segments[0] ?? id
 }
 
@@ -500,6 +593,10 @@ export async function openPoolManager(
         await callbacks.updatePool({ affinity: value === 'true' })
         return
       }
+      if (id === 'pool.quota-aware') {
+        await callbacks.updatePool({ quotaAwareRouting: value === 'true' })
+        return
+      }
       if (id === 'upstream.enabled') {
         await callbacks.updatePool({ includeUpstream: value === 'true' })
         return
@@ -516,6 +613,11 @@ export async function openPoolManager(
           key as SchedulerSettingKey,
           value === 'default' ? undefined : Number(value),
         )
+        return
+      }
+      const usageMatch = /^usage\.(.+)\.refresh$/.exec(id)
+      if (usageMatch !== null && value === 'refresh') {
+        await callbacks.refreshUsage(usageMatch[1]!)
         return
       }
       const accountMatch = /^account\.([^.]+)\.(label|enabled|weight|priority|remove)$/.exec(id)

@@ -34,6 +34,8 @@ export {
   type SessionPinHost,
 } from './session-pins.ts'
 export * from './auth-store.ts'
+export * from './usage.ts'
+export * from './usage-adapters.ts'
 export {
   createManagedIntegration,
   mergeProviderAuth,

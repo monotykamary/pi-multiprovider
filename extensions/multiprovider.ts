@@ -1,4 +1,4 @@
-import type { Api, AuthType, Credential, Model, Provider } from '@earendil-works/pi-ai'
+import type { Api, AuthResult, AuthType, Credential, Model, Provider } from '@earendil-works/pi-ai'
 import { normalizeContext } from '@earendil-works/pi-ai'
 import {
   DynamicBorder,
@@ -28,7 +28,9 @@ import {
   MULTIPROVIDER_SERVICE_EVENT,
   MultiAuthStore,
   MultiProviderService,
+  UsageService,
   PI_UPSTREAM_ACCOUNT_ID,
+  type AccountUsageSnapshot,
   type MultiAuthUpstreamPreferences,
   type MultiProviderIntegration,
   type MultiProviderServiceContext,
@@ -490,7 +492,8 @@ function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot
     lines.push(
       `${provider.label} (${provider.id}) · ${provider.policy}`
       + `${provider.firstAccountBias ? ' · main-first' : ''}`
-      + ` · affinity ${provider.affinity ? 'on' : 'off'}`,
+      + ` · affinity ${provider.affinity ? 'on' : 'off'}`
+      + ` · quota routing ${provider.quotaAwareRouting ? 'on' : 'off'}`,
     )
     if (provider.accounts.length === 0) {
       lines.push('  no accounts')
@@ -504,6 +507,49 @@ function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot
         `  ${account.label} (${account.authKind}) · ${account.status} · w${account.weight} · p${account.priority} · ${account.inFlight} in flight · ${account.consecutiveFailures} failures${cooldown}`,
       )
     }
+  }
+  return lines
+}
+
+function relativeReset(resetsAt: number | undefined): string | undefined {
+  if (resetsAt === undefined) return undefined
+  const remaining = resetsAt - Date.now()
+  if (remaining <= 0) return 'reset due'
+  if (remaining < 60_000) return 'resets in <1m'
+  if (remaining < 3_600_000) return `resets in ${Math.ceil(remaining / 60_000)}m`
+  if (remaining < 86_400_000) return `resets in ${Math.ceil(remaining / 3_600_000)}h`
+  return `resets in ${Math.ceil(remaining / 86_400_000)}d`
+}
+
+function usageLines(
+  providerName: string,
+  snapshots: readonly AccountUsageSnapshot[],
+  activeAccountId?: string,
+): string[] {
+  const lines = [providerName]
+  for (const account of snapshots) {
+    lines.push(
+      `${account.accountLabel}`
+      + `${account.accountId === activeAccountId ? ' · current' : ''}`
+      + ` · ${account.status}`
+      + `${account.plan === undefined ? '' : ` · ${account.plan}`}`
+      + ` · checked ${new Date(account.fetchedAt).toLocaleTimeString()}`,
+    )
+    if (account.windows.length === 0) {
+      lines.push(`  ${account.error ?? 'No usage windows reported.'}`)
+      continue
+    }
+    for (const window of account.windows) {
+      const percent = window.usedPercent === undefined ? undefined : `${Math.round(window.usedPercent)}% used`
+      const amount = window.remaining !== undefined && window.limit !== undefined
+        ? `${window.remaining}/${window.limit} left`
+        : window.remaining === undefined ? undefined : `${window.remaining} left`
+      const details = [percent, amount, relativeReset(window.resetsAt)]
+        .filter(value => value !== undefined)
+        .join(' · ')
+      lines.push(`  ${window.label}${details === '' ? '' : ` · ${details}`}`)
+    }
+    if (account.error !== undefined) lines.push(`  ${account.error}`)
   }
   return lines
 }
@@ -570,6 +616,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   let currentContext: ExtensionContext | undefined
   let pendingSessionPins: SessionPin[] = []
   let pendingInheritedSessionPins: InheritedSessionPin[] = []
+  let usageRefreshTimer: ReturnType<typeof setInterval> | undefined
 
   const effectiveIntegration = (providerId: string): AnyIntegration | undefined => {
     const managed = managedIntegrations.get(providerId)
@@ -583,6 +630,42 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     }
     return managed ?? external
   }
+
+  const providerForUsage = (providerId: string): Provider<Api> | undefined =>
+    baseProviders.get(providerId)
+    ?? currentContext?.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
+
+  const modelForUsage = (providerId: string): Model<Api> | undefined => {
+    const selected = currentContext?.model
+    if (selected?.provider === providerId) return selected as Model<Api>
+    return providerForUsage(providerId)?.getModels()[0]
+  }
+
+  const usage = new UsageService({
+    scheduler: service,
+    getIntegration: effectiveIntegration,
+    getProvider: providerForUsage,
+    getModel: modelForUsage,
+    async resolveUpstreamAuth(_providerId, _provider, model, signal): Promise<AuthResult | undefined> {
+      if (signal.aborted) return undefined
+      const context = currentContext
+      if (context === undefined) return undefined
+      const resolved = await context.modelRegistry.getApiKeyAndHeaders(model)
+      if (!resolved.ok || signal.aborted) return undefined
+      return {
+        auth: {
+          ...(resolved.apiKey === undefined ? {} : { apiKey: resolved.apiKey }),
+          ...(resolved.headers === undefined ? {} : { headers: resolved.headers }),
+          ...(resolved.baseUrl === undefined ? {} : { baseUrl: resolved.baseUrl }),
+        },
+        ...(resolved.env === undefined ? {} : { env: resolved.env }),
+        source: context.modelRegistry.isUsingOAuth(model) ? 'Pi default OAuth' : 'Pi default auth',
+      }
+    },
+    async isQuotaAware(providerId) {
+      return (await store.getPool(providerId))?.quotaAwareRouting ?? false
+    },
+  })
 
   // Mirrors the affinity key the lifted provider computes for each stream: the
   // integration's own key when defined, otherwise the Pi session id. Custom
@@ -731,6 +814,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       await service.updatePool(providerId, {
         policy: managedPool.policy,
         affinity: managedPool.affinity,
+        quotaAwareRouting: managedPool.quotaAwareRouting,
       })
     }
 
@@ -751,6 +835,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const storedIds = new Set(await store.listProviderIds())
     for (const providerId of [...managedIntegrations.keys()]) {
       if (storedIds.has(providerId)) continue
+      usage.clear(providerId)
       managedIntegrations.delete(providerId)
       managedBases.delete(providerId)
       if (!externalIntegrations.has(providerId)) restoreProvider(providerId, ctx)
@@ -974,6 +1059,19 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     await applyRecordedPins(ctx)
   }
 
+  const refreshQuotaAwarePools = async (): Promise<void> => {
+    for (const providerId of await store.listProviderIds()) {
+      const pool = await store.getPool(providerId)
+      if (pool?.quotaAwareRouting !== true || effectiveIntegration(providerId) === undefined) continue
+      try {
+        await usage.refreshProvider(providerId, true)
+      } catch {
+        // Account-level refresh failures are kept as stale/error snapshots;
+        // background polling must never interrupt the active Pi session.
+      }
+    }
+  }
+
   const unsubscribeRegistration = pi.events.on(MULTIPROVIDER_REGISTER_EVENT, value => {
     if (!isIntegration(value)) return
     const existing = externalIntegrations.get(value.id)
@@ -990,6 +1088,11 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       .filter((pin: InheritedSessionPin) => !recordedPools.has(pin.pool))
     await reconcile(ctx)
     announceService()
+    if (usageRefreshTimer === undefined) {
+      usageRefreshTimer = setInterval(() => { void refreshQuotaAwarePools() }, 5 * 60_000)
+      usageRefreshTimer.unref?.()
+    }
+    void refreshQuotaAwarePools()
   })
 
   pi.on('before_agent_start', async (_event, ctx) => {
@@ -998,6 +1101,8 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   })
 
   pi.on('session_shutdown', () => {
+    if (usageRefreshTimer !== undefined) clearInterval(usageRefreshTimer)
+    usageRefreshTimer = undefined
     unsubscribeRegistration()
     for (const providerId of installedProviders.keys()) restoreProvider(providerId, currentContext)
     managedIntegrations.clear()
@@ -1028,6 +1133,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       interface BufferedPool {
         policy: SelectionPolicy
         affinity: boolean
+        quotaAwareRouting: boolean
         includeUpstream: boolean
         upstream: MultiAuthUpstreamPreferences
       }
@@ -1035,6 +1141,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       let buffer: BufferedPool = {
         policy: initialPool?.policy ?? 'round-robin',
         affinity: initialPool?.affinity ?? true,
+        quotaAwareRouting: initialPool?.quotaAwareRouting ?? false,
         includeUpstream: initialPool?.includeUpstream ?? true,
         upstream: { ...(initialPool?.upstream ?? {}) },
       }
@@ -1056,16 +1163,19 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               poolExists: false,
               policy: buffer.policy,
               affinity: buffer.affinity,
+              quotaAwareRouting: buffer.quotaAwareRouting,
               includeUpstream: buffer.includeUpstream,
               upstream: { ...buffer.upstream },
               accounts: [],
               scheduler,
+              usage: usage.getCached(provider.id),
               ...upstreamState,
             }
           }
           buffer = {
             policy: pool.policy,
             affinity: pool.affinity,
+            quotaAwareRouting: pool.quotaAwareRouting,
             includeUpstream: pool.includeUpstream,
             upstream: { ...(pool.upstream ?? {}) },
           }
@@ -1073,10 +1183,12 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
             poolExists: true,
             policy: pool.policy,
             affinity: pool.affinity,
+            quotaAwareRouting: pool.quotaAwareRouting,
             includeUpstream: pool.includeUpstream,
             upstream: { ...(pool.upstream ?? {}) },
             accounts: pool.accounts,
             scheduler,
+            usage: usage.getCached(provider.id),
             ...upstreamState,
           }
         },
@@ -1084,20 +1196,29 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           if (await store.getPool(provider.id) === undefined) {
             if (settings.policy !== undefined) buffer.policy = settings.policy
             if (settings.affinity !== undefined) buffer.affinity = settings.affinity
+            if (settings.quotaAwareRouting !== undefined) buffer.quotaAwareRouting = settings.quotaAwareRouting
             if (settings.includeUpstream !== undefined) buffer.includeUpstream = settings.includeUpstream
             if (settings.upstream !== undefined) buffer.upstream = { ...settings.upstream }
             return
           }
           await store.updatePool(provider.id, settings)
           await reconcile(ctx)
+          if (settings.quotaAwareRouting === false) service.clearQuotaBlocks(provider.id)
+          if (settings.quotaAwareRouting === true) await usage.refreshProvider(provider.id, true)
         },
         async updateAccount(accountId, settings) {
           await store.updateAccount(provider.id, accountId, settings)
+          usage.clear(provider.id, accountId)
           await reconcile(ctx)
         },
         async removeAccount(accountId) {
           await store.removeAccount(provider.id, accountId)
+          if (await store.getPool(provider.id) === undefined) usage.clear(provider.id)
+          else usage.clear(provider.id, accountId)
           await reconcile(ctx)
+        },
+        async refreshUsage(accountId) {
+          await usage.refreshAccount(provider.id, accountId, true)
         },
         async updateScheduler(key, valueMs) {
           const patch: SchedulerSettingsPatch = { [key]: valueMs }
@@ -1144,6 +1265,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                       pool: {
                         policy: buffer.policy,
                         affinity: buffer.affinity,
+                        quotaAwareRouting: buffer.quotaAwareRouting,
                         includeUpstream: buffer.includeUpstream,
                         upstream: buffer.upstream,
                       },
@@ -1152,6 +1274,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               })
               credential = undefined
               await reconcile(ctx)
+              if (buffer.quotaAwareRouting) await usage.refreshProvider(provider.id, true)
               ctx.ui.notify(
                 `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
                 'info',
@@ -1208,6 +1331,8 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       )
       if (!confirmation) return
       await store.removeAccount(pool.providerId, account.id)
+      if (await store.getPool(pool.providerId) === undefined) usage.clear(pool.providerId)
+      else usage.clear(pool.providerId, account.id)
       await reconcile(ctx)
       ctx.ui.notify(`Removed ${account.label} from ${pool.providerId}.`, 'info')
     },
@@ -1223,6 +1348,49 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         return
       }
       await ctx.ui.select('Provider Accounts', statusLines(snapshot))
+    },
+  })
+
+  pi.registerCommand('usage', {
+    description: 'Show per-account AI usage, limits, and reset times',
+    handler: async (args, ctx) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify('/usage requires Pi interactive mode.', 'warning')
+        return
+      }
+      await reconcile(ctx)
+      const candidates = uniqueProviders(ctx, baseProviders)
+        .filter(provider => effectiveIntegration(provider.id) !== undefined && !virtualProviders.has(provider.id))
+      if (candidates.length === 0) {
+        ctx.ui.notify('No account pools are configured. Use /multilogin to add one.', 'info')
+        return
+      }
+
+      const ref = args.trim().toLowerCase()
+      let provider = ref === '' && ctx.model !== undefined
+        ? candidates.find(candidate => candidate.id === ctx.model?.provider)
+        : candidates.find(candidate => candidate.id.toLowerCase() === ref || candidate.name.toLowerCase() === ref)
+      if (provider === undefined && ref !== '') {
+        const matches = candidates.filter(candidate =>
+          candidate.id.toLowerCase().startsWith(ref) || candidate.name.toLowerCase().startsWith(ref))
+        if (matches.length === 1) provider = matches[0]
+      }
+      if (provider === undefined) {
+        const labels = candidates.map(candidate => `${candidate.name} (${candidate.id})`)
+        const selected = await ctx.ui.select('Select provider usage:', labels)
+        const index = labels.indexOf(selected ?? '')
+        if (index < 0) return
+        provider = candidates[index]
+      }
+      if (provider === undefined) return
+
+      try {
+        const snapshots = await usage.refreshProvider(provider.id, true)
+        const active = await announcement.getActiveAccount(provider.id, ctx)
+        await ctx.ui.select('Provider Usage', usageLines(provider.name, snapshots, active?.id))
+      } catch (error) {
+        ctx.ui.notify(`Could not refresh ${provider.name} usage: ${errorText(error)}`, 'error')
+      }
     },
   })
 

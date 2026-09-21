@@ -69,6 +69,7 @@ export interface PoolPreference {
   providerId: string
   policy: SelectionPolicy
   affinity: boolean
+  quotaAwareRouting: boolean
   accounts: AccountPreference[]
 }
 
@@ -114,6 +115,8 @@ export interface PublicAccountSnapshot {
   inFlight: number
   consecutiveFailures: number
   cooldownUntil?: number
+  quotaBlockedUntil?: number
+  cooldownReason?: FailureKind | 'usage-quota'
   lastSelectedAt?: number
   lastFailureKind?: FailureKind
   metadata: Readonly<Record<string, string | number | boolean | null>>
@@ -124,12 +127,46 @@ export interface PublicPoolSnapshot {
   label: string
   policy: SelectionPolicy
   affinity: boolean
+  quotaAwareRouting: boolean
   firstAccountBias: boolean
   managementHint?: string
   accounts: PublicAccountSnapshot[]
 }
 
 export interface MultiProviderSnapshot { providers: PublicPoolSnapshot[] }
+
+export type UsageUnit = 'requests' | 'tokens' | 'credits' | 'usd' | 'unknown'
+export type AccountUsageStatus = 'fresh' | 'stale' | 'unsupported' | 'error'
+
+export interface UsageWindow {
+  id: string
+  label: string
+  usedPercent?: number
+  used?: number
+  limit?: number
+  remaining?: number
+  unit?: UsageUnit
+  resetsAt?: number
+  windowSeconds?: number
+  scope?: string
+  active?: boolean
+}
+
+export interface ProviderUsageSnapshot {
+  plan?: string
+  windows: UsageWindow[]
+  fetchedAt?: number
+}
+
+export interface AccountUsageSnapshot extends Omit<ProviderUsageSnapshot, 'fetchedAt'> {
+  providerId: string
+  accountId: string
+  accountLabel: string
+  status: AccountUsageStatus
+  stale: boolean
+  fetchedAt: number
+  error?: string
+}
 
 /**
  * Fired when a pooled account is abandoned after its final tolerated error
@@ -241,6 +278,18 @@ export interface AccountAttemptContext<TApi extends Api = Api, TCredentialRef = 
   resolution: AuthResult
 }
 
+export interface UsageFetchContext<TApi extends Api = Api, TCredentialRef = unknown> {
+  provider: Provider<TApi>
+  model: Model<TApi>
+  account: ProviderAccount<TCredentialRef>
+  resolution: AuthResult
+  signal: AbortSignal
+}
+
+export type UsageFetcher<TApi extends Api = Api, TCredentialRef = unknown> = (
+  context: UsageFetchContext<TApi, TCredentialRef>,
+) => ProviderUsageSnapshot | undefined | Promise<ProviderUsageSnapshot | undefined>
+
 export interface LiftProviderOptions<TApi extends Api = Api, TCredentialRef = unknown> {
   auth?: ProviderAuth
   resolveAuth: (
@@ -265,7 +314,9 @@ export interface LiftProviderOptions<TApi extends Api = Api, TCredentialRef = un
 }
 
 export interface MultiProviderIntegration<TApi extends Api = Api, TCredentialRef = unknown>
-  extends ProviderRegistration<TCredentialRef>, LiftProviderOptions<TApi, TCredentialRef> {}
+  extends ProviderRegistration<TCredentialRef>, LiftProviderOptions<TApi, TCredentialRef> {
+  fetchUsage?: UsageFetcher<TApi, TCredentialRef>
+}
 
 export const MULTIPROVIDER_REGISTER_EVENT = 'pi-multiprovider:register'
 
