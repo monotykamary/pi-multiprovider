@@ -46,6 +46,7 @@ export interface MultiAuthPool {
   providerId: string
   policy: SelectionPolicy
   affinity: boolean
+  quotaAwareRouting: boolean
   includeUpstream: boolean
   upstream?: MultiAuthUpstreamPreferences
   accounts: MultiAuthAccount[]
@@ -63,6 +64,7 @@ export interface AddMultiAuthAccount {
 export interface MultiAuthPoolSettings {
   policy?: SelectionPolicy
   affinity?: boolean
+  quotaAwareRouting?: boolean
   includeUpstream?: boolean
   upstream?: MultiAuthUpstreamPreferences
 }
@@ -81,6 +83,7 @@ interface PersistedAccount extends MultiAuthAccount {
 interface PersistedPool {
   policy: SelectionPolicy
   affinity: boolean
+  quotaAwareRouting?: boolean
   includeUpstream: boolean
   upstream?: MultiAuthUpstreamPreferences
   accounts: PersistedAccount[]
@@ -288,6 +291,9 @@ function parseState(text: string): PersistedState {
     if (!Array.isArray(pool.accounts)) {
       throw new Error(`multiprovider: malformed accounts for "${providerId}"`)
     }
+    if (pool.quotaAwareRouting !== undefined && typeof pool.quotaAwareRouting !== 'boolean') {
+      throw new Error(`multiprovider: malformed quota-aware routing for "${providerId}"`)
+    }
     if (pool.upstream !== undefined) assertUpstreamPreferences(pool.upstream)
     for (const accountValue of pool.accounts) {
       if (typeof accountValue !== 'object' || accountValue === null) {
@@ -319,6 +325,7 @@ function publicPool(providerId: string, pool: PersistedPool): MultiAuthPool {
     providerId,
     policy: pool.policy,
     affinity: pool.affinity,
+    quotaAwareRouting: pool.quotaAwareRouting ?? false,
     includeUpstream: pool.includeUpstream,
     ...(pool.upstream === undefined ? {} : { upstream: { ...pool.upstream } }),
     accounts: pool.accounts.map(publicAccount),
@@ -427,12 +434,16 @@ export class MultiAuthStore {
       const pool = state.providers[providerId] ?? {
         policy: DEFAULT_POLICY,
         affinity: true,
+        quotaAwareRouting: false,
         includeUpstream: true,
         accounts: [],
       }
       state.providers[providerId] = pool
       if (input.pool?.policy !== undefined) pool.policy = input.pool.policy
       if (input.pool?.affinity !== undefined) pool.affinity = input.pool.affinity
+      if (input.pool?.quotaAwareRouting !== undefined) {
+        pool.quotaAwareRouting = input.pool.quotaAwareRouting
+      }
       if (input.pool?.includeUpstream !== undefined) pool.includeUpstream = input.pool.includeUpstream
       if (input.pool?.upstream !== undefined) {
         const upstream = normalizeUpstreamPreferences({ ...pool.upstream, ...input.pool.upstream })
@@ -475,6 +486,7 @@ export class MultiAuthStore {
       if (pool === undefined) throw new Error(`multiprovider: unknown stored pool "${providerId}"`)
       if (settings.policy !== undefined) pool.policy = settings.policy
       if (settings.affinity !== undefined) pool.affinity = settings.affinity
+      if (settings.quotaAwareRouting !== undefined) pool.quotaAwareRouting = settings.quotaAwareRouting
       if (settings.includeUpstream !== undefined) pool.includeUpstream = settings.includeUpstream
       if (settings.upstream !== undefined) {
         const upstream = normalizeUpstreamPreferences(settings.upstream)

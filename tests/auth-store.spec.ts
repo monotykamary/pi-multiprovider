@@ -199,6 +199,28 @@ describe('MultiAuthStore', () => {
 })
 
 describe('MultiAuthStore upstream preferences and scheduler settings', () => {
+  it('defaults legacy pools to quota-aware routing off and persists opt-in', async () => {
+    const { directory, store } = await storeFixture()
+    await writeFile(
+      join(directory, 'multiprovider-auth.json'),
+      JSON.stringify({
+        version: 1,
+        providers: {
+          example: {
+            policy: 'round-robin',
+            affinity: true,
+            includeUpstream: true,
+            accounts: [],
+          },
+        },
+      }),
+    )
+    expect((await store.getPool('example'))?.quotaAwareRouting).toBe(false)
+    expect((await store.updatePool('example', { quotaAwareRouting: true })).quotaAwareRouting).toBe(true)
+    const reread = new MultiAuthStore(join(directory, 'multiprovider-auth.json'))
+    expect((await reread.getPool('example'))?.quotaAwareRouting).toBe(true)
+  })
+
   it('stores, normalizes, and clears upstream preferences per pool', async () => {
     const { store } = await storeFixture()
     await store.addAccount('example', {

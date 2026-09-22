@@ -29,6 +29,7 @@
     "media",
     "README.md",
     "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
     "LICENSE"
   ],
   "scripts": {

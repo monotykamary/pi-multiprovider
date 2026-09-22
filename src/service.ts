@@ -26,6 +26,7 @@ interface RuntimeState {
   inFlight: number
   consecutiveFailures: number
   cooldownUntil: number
+  quotaBlockedUntil: number
   lastSelectedAt?: number
   lastFailureKind?: FailureKind
 }
@@ -158,13 +159,17 @@ export class MultiProviderService {
     const excluded = new Set(options.excludeAccountIds ?? [])
     const now = this.now()
     const available = accounts.filter(item =>
-      item.enabled && item.runtime.cooldownUntil <= now && !excluded.has(item.account.id),
+      item.enabled
+        && Math.max(item.runtime.cooldownUntil, item.runtime.quotaBlockedUntil) <= now
+        && !excluded.has(item.account.id),
     )
 
     if (available.length === 0) {
       const future = accounts
-        .filter(item => item.enabled && !excluded.has(item.account.id) && item.runtime.cooldownUntil > now)
-        .map(item => item.runtime.cooldownUntil)
+        .filter(item => item.enabled
+          && !excluded.has(item.account.id)
+          && Math.max(item.runtime.cooldownUntil, item.runtime.quotaBlockedUntil) > now)
+        .map(item => Math.max(item.runtime.cooldownUntil, item.runtime.quotaBlockedUntil))
       throw new NoAccountAvailableError(
         options.providerId,
         future.length === 0 ? undefined : Math.min(...future),
@@ -236,26 +241,36 @@ export class MultiProviderService {
       const now = this.now()
       const accounts: PublicAccountSnapshot[] = effective.map(({
         account, enabled, weight, priority, runtime,
-      }) => ({
-        id: account.id,
-        label: account.label,
-        authKind: account.authKind,
-        enabled,
-        weight,
-        priority,
-        status: !enabled ? 'disabled' : runtime.cooldownUntil > now ? 'cooldown' : 'ready',
-        inFlight: runtime.inFlight,
-        consecutiveFailures: runtime.consecutiveFailures,
-        ...(runtime.cooldownUntil > now ? { cooldownUntil: runtime.cooldownUntil } : {}),
-        ...(runtime.lastSelectedAt === undefined ? {} : { lastSelectedAt: runtime.lastSelectedAt }),
-        ...(runtime.lastFailureKind === undefined ? {} : { lastFailureKind: runtime.lastFailureKind }),
-        metadata: account.metadata ?? {},
-      }))
+      }) => {
+        const cooldownUntil = Math.max(runtime.cooldownUntil, runtime.quotaBlockedUntil)
+        const quotaWins = runtime.quotaBlockedUntil > now
+          && runtime.quotaBlockedUntil >= runtime.cooldownUntil
+        return {
+          id: account.id,
+          label: account.label,
+          authKind: account.authKind,
+          enabled,
+          weight,
+          priority,
+          status: !enabled ? 'disabled' : cooldownUntil > now ? 'cooldown' : 'ready',
+          inFlight: runtime.inFlight,
+          consecutiveFailures: runtime.consecutiveFailures,
+          ...(cooldownUntil > now ? { cooldownUntil } : {}),
+          ...(runtime.quotaBlockedUntil > now ? { quotaBlockedUntil: runtime.quotaBlockedUntil } : {}),
+          ...(cooldownUntil > now && (quotaWins || runtime.lastFailureKind !== undefined)
+            ? { cooldownReason: quotaWins ? 'usage-quota' as const : runtime.lastFailureKind! }
+            : {}),
+          ...(runtime.lastSelectedAt === undefined ? {} : { lastSelectedAt: runtime.lastSelectedAt }),
+          ...(runtime.lastFailureKind === undefined ? {} : { lastFailureKind: runtime.lastFailureKind }),
+          metadata: account.metadata ?? {},
+        }
+      })
       providers.push({
         id: registration.id,
         label: registration.label,
         policy: pool.policy,
         affinity: pool.affinity,
+        quotaAwareRouting: pool.quotaAwareRouting,
         firstAccountBias: (this.selectionBias.get(registration.id) ?? DEFAULT_SELECTION_BIAS) === 'first-account',
         ...(registration.managementHint === undefined
           ? {}
@@ -268,7 +283,7 @@ export class MultiProviderService {
 
   async updatePool(
     providerId: string,
-    patch: Partial<Pick<PoolPreference, 'policy' | 'affinity' | 'accounts'>>,
+    patch: Partial<Pick<PoolPreference, 'policy' | 'affinity' | 'quotaAwareRouting' | 'accounts'>>,
   ): Promise<PublicPoolSnapshot> {
     this.registration(providerId)
     const current = this.pool(providerId)
@@ -276,6 +291,7 @@ export class MultiProviderService {
       providerId,
       policy: patch.policy ?? current.policy,
       affinity: patch.affinity ?? current.affinity,
+      quotaAwareRouting: patch.quotaAwareRouting ?? current.quotaAwareRouting,
       accounts: (patch.accounts ?? current.accounts).map(account => ({ ...account })),
     }
     this.preferences.set(providerId, next)
@@ -314,6 +330,24 @@ export class MultiProviderService {
     runtime.consecutiveFailures = 0
     runtime.cooldownUntil = 0
     delete runtime.lastFailureKind
+  }
+
+  setQuotaBlock(providerId: string, accountId: string, blockedUntil?: number): void {
+    this.registration(providerId)
+    const runtime = this.runtimeFor(providerId, accountId)
+    runtime.quotaBlockedUntil = blockedUntil === undefined || blockedUntil <= this.now()
+      ? 0
+      : blockedUntil
+  }
+
+  clearQuotaBlocks(providerId?: string): void {
+    for (const [key, runtime] of this.runtime) {
+      if (providerId !== undefined) {
+        const parsed = JSON.parse(key) as [string, string]
+        if (parsed[0] !== providerId) continue
+      }
+      runtime.quotaBlockedUntil = 0
+    }
   }
 
   async pinAccount(providerId: string, affinityKey: string, accountId: string): Promise<void> {
@@ -377,6 +411,7 @@ export class MultiProviderService {
           providerId,
           policy: this.defaults.defaultPolicy,
           affinity: this.defaults.affinity,
+          quotaAwareRouting: false,
           accounts: [],
         }
       : {
@@ -389,7 +424,7 @@ export class MultiProviderService {
     const key = stateKey(providerId, accountId)
     let runtime = this.runtime.get(key)
     if (runtime === undefined) {
-      runtime = { inFlight: 0, consecutiveFailures: 0, cooldownUntil: 0 }
+      runtime = { inFlight: 0, consecutiveFailures: 0, cooldownUntil: 0, quotaBlockedUntil: 0 }
       this.runtime.set(key, runtime)
     }
     return runtime

@@ -34,6 +34,8 @@ If an account fails before visible output, the lift can cool it down and retry a
 | 🔃 | **`/switch-account`** | Session pin to one pooled account for the current model—restored when the session is resumed; pool settings untouched. |
 | 🧬 | **Upstream merge** | Optionally treats Pi's normal `/login`, `auth.json`, environment, or ambient credential as another account—editable inline like any stored account. |
 | 🩺 | **Health-aware leases** | Tracks in-flight work, failures, cooldowns, session affinity, and retry exclusions. |
+| 📊 | **Per-account usage** | Shows provider-reported usage, remaining limits, and reset times for every stored account and Pi default auth. |
+| 🧭 | **Quota-aware routing** | Optionally bypasses a freshly confirmed exhausted account until its known reset, including temporary fallback from an explicit session pin. |
 | 🛡️ | **Stream-safe failover** | Suppresses a rejected attempt's start/error events and retries only before user-visible output. |
 | 🧱 | **Error tolerance before switching** | Absorbs up to 3 pre-output errors on the same account before failing over, so one blip never pays a cold-cache switch. |
 | 🪪 | **Stable identity** | Provider ID, model ID, model picker entries, routing, and session history remain unchanged. |
@@ -92,7 +94,7 @@ The flow:
 1. Searches providers and authentication methods exactly where Pi's `/login` UI does.
 2. Opens the pool manager, a settings view mirroring Pi's `/settings`: fuzzy search, inline value cycling, and drill-in submenus.
 3. The **Add account** row asks for a non-secret label and runs the provider's own login implementation—including pasting an API key for providers without an interactive flow—then returns to the manager.
-4. Every other row edits live settings: pool strategy and session affinity, an **Accounts** section grouping every pooled credential—**Pi default (upstream)** plus stored accounts—with per-account weight (traffic share) and priority (failover order), and scheduler cooldowns.
+4. Every other row edits live settings: pool strategy, session affinity, opt-in quota-aware routing, an **Accounts** section grouping every pooled credential—**Pi default (upstream)** plus stored accounts—with per-account usage, weight (traffic share), priority (failover order), and scheduler cooldowns.
 
 Add as many accounts as you need from the same manager. Remove credentials from an account's submenu or with `/multilogout`; Pi's regular `/logout` and `auth.json` remain independent.
 
@@ -104,6 +106,7 @@ Add as many accounts as you need from the same manager. Remove credentials from 
 | `/multilogout [provider]` | Remove an account saved by `/multilogin`. |
 | `/vprovider [id]` | Create and edit virtual providers that map one model across multiple provider models. |
 | `/accounts` | Inspect pool policy, account status, in-flight leases, failures, and cooldowns. |
+| `/usage [provider]` | Refresh and inspect usage, remaining limits, and reset times for every account in a provider pool. |
 | `/switch-account [label]` | Pin this session to one pooled account of the current model's provider, or return to automatic selection. The choice is restored the next time the session is resumed. |
 
 ## Pool strategies
@@ -118,6 +121,16 @@ Add as many accounts as you need from the same manager. Remove credentials from 
 First-account bias keeps every new session on the account listed first in the pool—**Pi default (upstream)** when included, otherwise the first stored account—so you stop seeing sessions start on a backup account while the main one has plenty of usage. Integrations that want even request rotation register with `selectionBias: 'none'`, which restores the classic rotate-through-healthy-accounts behavior: accounts rotate in pool order (the order they are configured, never re-sorted by id), the rotation starts at a random account so restarts do not favor the same one, and differing per-account weights share traffic smoothly instead of being ignored.
 
 Session affinity can pin a healthy account to the current Pi session. Explicit retry exclusions always win, so a rejected account is not selected twice for the same logical request. Switch strategies, affinity, and per-account weight and priority at any time inside `/multilogin`. `/switch-account` sets the pinned account explicitly for one session without touching these settings. Pi Fabric participant agents inherit that pin through `PI_MULTIPROVIDER_SESSION_PINS` and rebind it to the child session, so spawned workers keep the operator's chosen account.
+
+## Usage and quota-aware routing
+
+Run `/usage` to refresh the current provider, or `/usage provider-id` to choose one directly. The same cached summary appears on each account row in `/multilogin`; drill into an account to refresh it individually. Usage cache entries are keyed by both provider id and account id, live only in memory, expire after five minutes, and never contain credential values.
+
+**Quota-aware routing is off by default.** Enable it per pool in `/multilogin`. Enabled pools refresh in the background every five minutes; other pools refresh only when `/usage` or the account's refresh action is used. Routing blocks an account only when a fresh, authoritative response reports 100% used (or zero remaining) and supplies a future reset time. Stale data, endpoint errors, unsupported credentials, and exhausted windows without a known reset never create a routing block.
+
+An explicitly pinned account stays pinned while blocked: another healthy account serves temporarily, then the session returns to the pinned account after reset. Disabling quota-aware routing immediately clears usage-derived blocks without changing ordinary failure cooldowns.
+
+Built-in adapters cover compatible Pi credentials for OpenAI Codex, Claude OAuth, Gemini OAuth, GitHub Copilot, xAI/Grok, Kimi Coding, OpenCode Go, DeepSeek, MiniMax, Z.AI, Moonshot, and OpenRouter. Xiaomi console usage is available only when an integration resolves a signed-in console Cookie header. Providers whose usage endpoint needs a different credential than Pi's model credential show `unsupported`; provider extensions can supply their own `fetchUsage` adapter through the integration API. Provider billing endpoints are unofficial integration surfaces and may change independently.
 
 ### Error tolerance and failover compaction
 
@@ -176,7 +189,7 @@ Pi still owns its one normal provider credential. Multiprovider owns additional 
 
 API-key credentials use the provider's native `resolve()` method, including provider-scoped environment values. OAuth credentials use the provider's native `login()`, `refresh()`, and `toAuth()` methods; refresh runs under the account-store lock with Pi's five-minute validity window.
 
-When **Pi default** is enabled, the lifted auth method first lets Pi resolve its normal credential. Multiprovider marks only the names—not values—of credential-specific headers and environment fields. If a stored account is selected, stale upstream auth fields and credential-specific base URLs are removed before transport.
+When **Pi default** is enabled, the lifted auth method first lets Pi resolve its normal credential. Multiprovider marks only the names—not values—of credential-specific headers and environment fields. If a stored account is selected, stale upstream auth fields and credential-specific base URLs are removed before transport. Usage refreshes resolve the selected account through this same path and send its credential only to that provider's usage endpoint.
 
 Inside `/multilogin` the **Pi default** credential appears in the pool's account list like any stored account: relabel it, raise or lower its weight (default 1) and priority (default 0), or disable it so only multilogin accounts run. When no pool exists yet but `/login` already has a credential configured, it is listed as pending so it can be preconfigured before the first stored account. The credential value itself stays Pi-owned—rotate or replace it through `/login`. Pool, account, upstream, and scheduler settings persist alongside the credentials in `multiprovider-auth.json`. The manager's **Scheduler** section overrides the global failure cooldowns live: rate limit (60s), quota (15m), auth (5m), transient base (1s, doubling per consecutive failure), and the 60m cap.
 
@@ -207,7 +220,7 @@ The implementation was exercised against the actual sibling `pi-zro-provider` an
 | Second stored ZRO API key, no `ZRO_API_KEY` environment fallback | `ZRO_SECOND_OK` |
 | Priority-1 synthetic invalid key → priority-2 valid key, same `zro/deepseek-v4-flash-0731` stream | `ZRO_FAILOVER_OK` |
 
-The package also has direct Pi runtime probes and 31 deterministic tests covering scheduling, session account pinning, the service announcement, stream integrity, cancellation, secure storage, concurrent mutation, OAuth refresh locking, upstream auth scrubbing, upstream preference persistence, scheduler settings, pool-only availability, and simulated API-key/OAuth login flows.
+The package also has direct Pi runtime probes and 87 deterministic tests covering scheduling, usage parsing and cache isolation, quota-aware routing, session account pinning, the service announcement, stream integrity, cancellation, secure storage, concurrent mutation, OAuth refresh locking, upstream auth scrubbing, upstream preference persistence, scheduler settings, pool-only availability, and simulated API-key/OAuth login flows.
 
 ## Provider integration API
 
@@ -240,6 +253,11 @@ export default function providerExtension(pi: ExtensionAPI) {
     ],
     async resolveAuth(account, signal) {
       return resolveProviderOwnedCredential(account.credentialRef, signal);
+    },
+    async fetchUsage({ account, resolution, signal }) {
+      return fetchProviderUsage(account.id, resolution.auth, signal);
+      // Return { plan?, windows: [{ id, label, usedPercent?, remaining?,
+      // limit?, resetsAt? }] }, or undefined when this auth is unsupported.
     },
   });
 }
@@ -275,6 +293,7 @@ For direct composition, the public package exports `MultiProviderService`, `lift
 
 - **No replay after output.** A failure after any content event is surfaced unchanged.
 - **No secret snapshots.** Public account state contains labels and health only, never credential references or credential values.
+- **Memory-only usage cache.** Usage snapshots and routing blocks are not written to `multiprovider-auth.json`; adapter errors redact resolved credential material.
 - **Case-insensitive header replacement.** Selected auth replaces matching headers and can remove obsolete auth fields.
 - **Lease lifetime equals stream lifetime.** Success, failure, and cancellation release capacity exactly once.
 - **Provider re-registration is expected.** The extension re-lifts current provider objects before agent execution, covering dynamic model refreshes used by provider packages.
@@ -286,6 +305,7 @@ Current limits:
 - A broken or revoked OAuth credential in Pi's primary `auth.json` can fail during Pi's pre-stream refresh before account selection. Run `/logout` for that provider or repair the primary login; extra pooled OAuth refreshes are independently isolated.
 - If both a stored pool and a provider-owned integration register for one ID, the stored pool wins and Pi displays a warning.
 - Provider-owned integrations with a custom `affinityKey` are invoked with a minimal context by `/switch-account`; keys that depend on request message history cannot be reproduced there and fall back to the Pi session id.
+- Usage support depends on the provider exposing a compatible account-level endpoint. Unsupported auth types remain selectable for model traffic and simply show `unsupported` in the usage view.
 
 ## Development
 
@@ -310,6 +330,7 @@ See [SECURITY.md](SECURITY.md) for the local credential threat model and private
 - Inspired by [hjanuschka/pi-multi-pass](https://github.com/hjanuschka/pi-multi-pass), while keeping one provider identity and moving retries down to the stream boundary.
 - Scheduler and credential-ownership semantics mirror the lift used by [`dsh-multiprovider`](../dsh-multiprovider) during local development.
 - Built on Pi's native `Provider`, auth interaction, and TUI component APIs.
+- Usage endpoint shapes and parsing were adapted from [QuotaBar](https://github.com/QuotaBar/QuotaBar), used under the MIT License; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
 
