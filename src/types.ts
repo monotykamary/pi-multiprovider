@@ -13,6 +13,7 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent'
 export type AuthKind = 'api-key' | 'oauth' | 'service-account' | 'custom'
 export type SelectionPolicy = 'round-robin' | 'weighted-round-robin' | 'least-inflight' | 'priority'
 export type FailureKind = 'rate-limit' | 'quota' | 'auth' | 'transient' | 'fatal'
+export type FailureScope = 'account' | 'account-model'
 
 // How plain round-robin breaks ties when no session pin exists. 'first-account'
 // always starts at the first healthy account in pool order (the "main"
@@ -44,6 +45,7 @@ export interface FailureDisposition {
   kind: FailureKind
   retryable: boolean
   cooldownMs?: number
+  scope?: FailureScope
 }
 
 export interface ProviderRegistration<TCredentialRef = unknown> {
@@ -82,6 +84,7 @@ export interface AffinityPin {
 
 export interface AcquireOptions {
   providerId: string
+  modelId?: string
   affinityKey?: string
   excludeAccountIds?: Iterable<string>
 }

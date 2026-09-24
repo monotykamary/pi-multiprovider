@@ -168,6 +168,7 @@ function virtualStream<TApi extends Api>(
         try {
           lease = await service.acquire<VirtualBackend>({
             providerId: schedulerId,
+            modelId: model.id,
             affinityKey,
             excludeAccountIds: attempted,
           })
