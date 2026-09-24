@@ -34,6 +34,7 @@ If an account fails before visible output, the lift can cool it down and retry a
 | 🔃 | **`/switch-account`** | Session pin to one pooled account for the current model—restored when the session is resumed; pool settings untouched. |
 | 🧬 | **Upstream merge** | Optionally treats Pi's normal `/login`, `auth.json`, environment, or ambient credential as another account—editable inline like any stored account. |
 | 🩺 | **Health-aware leases** | Tracks in-flight work, failures, cooldowns, session affinity, and retry exclusions. |
+| ♻️ | **In-place reauthentication** | Re-run a provider login for an existing account and swap its credential without losing label, weight, priority, or session pins. |
 | 🛡️ | **Stream-safe failover** | Suppresses a rejected attempt's start/error events and retries only before user-visible output. |
 | 🧱 | **Error tolerance before switching** | Absorbs up to 3 pre-output errors on the same account before failing over, so one blip never pays a cold-cache switch. |
 | 🪪 | **Stable identity** | Provider ID, model ID, model picker entries, routing, and session history remain unchanged. |
@@ -94,7 +95,7 @@ The flow:
 3. The **Add account** row asks for a non-secret label and runs the provider's own login implementation—including pasting an API key for providers without an interactive flow—then returns to the manager.
 4. Every other row edits live settings: pool strategy and session affinity, an **Accounts** section grouping every pooled credential—**Pi default (upstream)** plus stored accounts—with per-account weight (traffic share) and priority (failover order), and scheduler cooldowns.
 
-Add as many accounts as you need from the same manager. Remove credentials from an account's submenu or with `/multilogout`; Pi's regular `/logout` and `auth.json` remain independent.
+Add as many accounts as you need from the same manager. Remove credentials from an account's submenu or with `/multilogout`; Pi's regular `/logout` and `auth.json` remain independent. **Reauthenticate** in a stored account's submenu re-runs the provider's own login flow and replaces that account's credential in place — label, weight, priority, and session pins stay, and the account's cooldown clears. Use it when a provider revokes or invalidates a refresh token (for example `refresh_token_invalidated`) instead of removing and re-adding the account.
 
 ### Commands
 
@@ -283,7 +284,7 @@ For direct composition, the public package exports `MultiProviderService`, `lift
 Current limits:
 
 - Deferred fetch/cancel operations are not lifted yet; `stream` and `streamSimple` are the supported failover paths.
-- A broken or revoked OAuth credential in Pi's primary `auth.json` can fail during Pi's pre-stream refresh before account selection. Run `/logout` for that provider or repair the primary login; extra pooled OAuth refreshes are independently isolated.
+- A broken or revoked OAuth credential in Pi's primary `auth.json` can fail during Pi's pre-stream refresh before account selection. Repair that one through Pi's own `/login` (`/logout` first when the old credential blocks the flow) — multiprovider never writes it. Pooled credentials refresh independently and can be repaired in place with **Reauthenticate** in the `/multilogin` account submenu.
 - If both a stored pool and a provider-owned integration register for one ID, the stored pool wins and Pi displays a warning.
 - Provider-owned integrations with a custom `affinityKey` are invoked with a minimal context by `/switch-account`; keys that depend on request message history cannot be reproduced there and fall back to the Pi session id.
 

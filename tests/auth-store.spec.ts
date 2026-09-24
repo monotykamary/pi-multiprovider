@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   createProvider,
+  type Credential,
   type Model,
   type OAuthCredential,
 } from '@earendil-works/pi-ai'
@@ -195,6 +196,48 @@ describe('MultiAuthStore', () => {
     ])
     expect(refreshes).toBe(1)
     expect(JSON.stringify(await store.getPool('example'))).not.toContain('refreshed-access')
+  })
+
+  it('replaces an existing account credential in place, keeping identity and pool settings', async () => {
+    const { directory, store } = await storeFixture()
+    const account = await store.addAccount('example', {
+      label: 'Work',
+      credential: { type: 'api_key', key: 'stale-secret' },
+      enabled: false,
+      weight: 3,
+      priority: 1,
+    })
+    const replaced = await store.replaceAccountCredential('example', account.id, {
+      type: 'oauth',
+      refresh: 'fresh-refresh',
+      access: 'fresh-access',
+      expires: Date.now() + 60_000,
+    })
+    expect(replaced).toMatchObject({
+      id: account.id,
+      label: 'Work',
+      authKind: 'oauth',
+      enabled: false,
+      weight: 3,
+      priority: 1,
+      createdAt: account.createdAt,
+    })
+    expect(replaced.updatedAt >= account.updatedAt).toBe(true)
+    const persisted = JSON.parse(await readFile(join(directory, 'multiprovider-auth.json'), 'utf8'))
+    expect(persisted.providers.example.accounts).toHaveLength(1)
+    expect(persisted.providers.example.accounts[0].credential).toMatchObject({
+      type: 'oauth',
+      access: 'fresh-access',
+    })
+    expect(JSON.stringify(await store.getPool('example'))).not.toContain('fresh-access')
+
+    await expect(store.replaceAccountCredential('example', 'missing', {
+      type: 'api_key',
+      key: 'x',
+    })).rejects.toThrow('unknown stored account')
+    await expect(store.replaceAccountCredential('example', account.id, {
+      type: 'unsupported',
+    } as unknown as Credential)).rejects.toThrow('unsupported stored credential type')
   })
 })
 

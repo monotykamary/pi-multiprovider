@@ -456,6 +456,28 @@ export class MultiAuthStore {
     })
   }
 
+  /**
+   * Replaces an existing account's credential in place. Reauthentication uses
+   * this instead of remove + add so the account keeps its id, label, weight,
+   * priority, and any session pins pointing at it.
+   */
+  async replaceAccountCredential(
+    providerId: string,
+    accountId: string,
+    credential: Credential,
+  ): Promise<MultiAuthAccount> {
+    assertSafeKey(providerId, 'provider id')
+    assertCredential(credential)
+    return this.mutate(state => {
+      const account = state.providers[providerId]?.accounts.find(candidate => candidate.id === accountId)
+      if (account === undefined) throw new Error(`multiprovider: unknown stored account "${accountId}"`)
+      account.credential = structuredClone(credential)
+      account.authKind = credential.type === 'oauth' ? 'oauth' : 'api-key'
+      account.updatedAt = new Date().toISOString()
+      return publicAccount(account)
+    })
+  }
+
   async removeAccount(providerId: string, accountId: string): Promise<boolean> {
     return this.mutate(state => {
       const pool = state.providers[providerId]

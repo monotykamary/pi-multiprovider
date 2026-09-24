@@ -1120,45 +1120,81 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         })
       }
 
+      const runLogin = async (method: string, title?: string) =>
+        method === 'api_key_paste'
+          ? await promptApiKeyCredential(ctx, provider)
+          : await showLoginDialog(
+              ctx,
+              { provider, authType: method as AuthType },
+              title === undefined ? {} : { title },
+            )
+
       let result = await openPoolManager(ctx, provider, callbacks, methods)
-      while (result.type === 'add') {
-        const method = result.method
-        const existing = await store.getPool(provider.id)
-        const defaultLabel = `${provider.name} ${(existing?.accounts.length ?? 0) + 1}`
-        const labelInput = await ctx.ui.input('Account label:', defaultLabel)
-        if (labelInput !== undefined) {
-          const label = labelInput.trim() || defaultLabel
-          const login = method === 'api_key_paste'
-            ? await promptApiKeyCredential(ctx, provider)
-            : await showLoginDialog(ctx, { provider, authType: method as AuthType })
-          if (login !== undefined && 'error' in login) {
-            ctx.ui.notify(`Failed to authenticate ${provider.name}: ${login.error.message}`, 'error')
-          } else if (login !== undefined) {
-            let credential: Credential | undefined = login.credential
-            try {
-              await store.addAccount(provider.id, {
-                label,
-                credential,
-                ...(await store.getPool(provider.id) === undefined
-                  ? {
-                      pool: {
-                        policy: buffer.policy,
-                        affinity: buffer.affinity,
-                        includeUpstream: buffer.includeUpstream,
-                        upstream: buffer.upstream,
-                      },
-                    }
-                  : {}),
-              })
-              credential = undefined
-              await reconcile(ctx)
-              ctx.ui.notify(
-                `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
-                'info',
-              )
-            } catch (error) {
-              credential = undefined
-              ctx.ui.notify(`Could not save account: ${errorText(error)}`, 'error')
+      while (result.type === 'add' || result.type === 'reauth') {
+        if (result.type === 'reauth') {
+          const reauthAccountId = result.accountId
+          const pool = await store.getPool(provider.id)
+          const account = pool?.accounts.find(candidate => candidate.id === reauthAccountId)
+          if (account === undefined) {
+            ctx.ui.notify('That account is no longer stored.', 'warning')
+          } else {
+            const login = await runLogin(result.method, `Reauthenticate ${account.label}`)
+            if (login !== undefined && 'error' in login) {
+              ctx.ui.notify(`Failed to reauthenticate ${account.label}: ${login.error.message}`, 'error')
+            } else if (login !== undefined) {
+              let credential: Credential | undefined = login.credential
+              try {
+                await store.replaceAccountCredential(provider.id, account.id, credential)
+                credential = undefined
+                if (service.hasProvider(provider.id)) service.resetHealth(provider.id, account.id)
+                await reconcile(ctx)
+                ctx.ui.notify(
+                  `Reauthenticated ${account.label} for ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
+                  'info',
+                )
+              } catch (error) {
+                credential = undefined
+                ctx.ui.notify(`Could not replace account credentials: ${errorText(error)}`, 'error')
+              }
+            }
+          }
+        } else {
+          const method = result.method
+          const existing = await store.getPool(provider.id)
+          const defaultLabel = `${provider.name} ${(existing?.accounts.length ?? 0) + 1}`
+          const labelInput = await ctx.ui.input('Account label:', defaultLabel)
+          if (labelInput !== undefined) {
+            const label = labelInput.trim() || defaultLabel
+            const login = await runLogin(method)
+            if (login !== undefined && 'error' in login) {
+              ctx.ui.notify(`Failed to authenticate ${provider.name}: ${login.error.message}`, 'error')
+            } else if (login !== undefined) {
+              let credential: Credential | undefined = login.credential
+              try {
+                await store.addAccount(provider.id, {
+                  label,
+                  credential,
+                  ...(await store.getPool(provider.id) === undefined
+                    ? {
+                        pool: {
+                          policy: buffer.policy,
+                          affinity: buffer.affinity,
+                          includeUpstream: buffer.includeUpstream,
+                          upstream: buffer.upstream,
+                        },
+                      }
+                    : {}),
+                })
+                credential = undefined
+                await reconcile(ctx)
+                ctx.ui.notify(
+                  `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
+                  'info',
+                )
+              } catch (error) {
+                credential = undefined
+                ctx.ui.notify(`Could not save account: ${errorText(error)}`, 'error')
+              }
             }
           }
         }

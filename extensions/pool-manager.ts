@@ -56,7 +56,10 @@ export interface PoolManagerAuthMethod {
   value: string
 }
 
-export type PoolManagerResult = { type: 'closed' } | { type: 'add'; method: string }
+export type PoolManagerResult =
+  | { type: 'closed' }
+  | { type: 'add'; method: string }
+  | { type: 'reauth'; accountId: string; method: string }
 
 const POLICIES: readonly SelectionPolicy[] = [
   'round-robin',
@@ -67,6 +70,7 @@ const POLICIES: readonly SelectionPolicy[] = [
 
 const REMOVE_SENTINEL = '__remove__'
 const ADD_SENTINEL_PREFIX = '__add__:'
+const REAUTH_SENTINEL_PREFIX = '__reauth__:'
 
 const RATE_LIMIT_OPTIONS = [15_000, 30_000, 60_000, 120_000, 300_000, 600_000]
 const QUOTA_OPTIONS = [300_000, 900_000, 1_800_000, 3_600_000, 7_200_000]
@@ -227,9 +231,50 @@ function upstreamRow(
   )
 }
 
+// The login method a reauthentication starts from: the account's current
+// credential kind when the provider still exposes it, otherwise the first
+// method available.
+function preferredAuthMethod(
+  account: MultiAuthAccount,
+  methods: readonly PoolManagerAuthMethod[],
+): string | undefined {
+  const preferred = account.authKind === 'oauth'
+    ? 'oauth'
+    : account.authKind === 'api-key' ? 'api_key' : undefined
+  const match = methods.find(method => method.value === preferred)
+  if (match !== undefined) return match.value
+  if (account.authKind === 'api-key') {
+    return methods.find(method => method.value === 'api_key_paste')?.value
+  }
+  return methods[0]?.value
+}
+
+function reauthRow(
+  theme: Theme,
+  account: MultiAuthAccount,
+  methods: readonly PoolManagerAuthMethod[],
+  persist: (id: string, value: string) => void,
+): SettingItem {
+  return setting(`account.${account.id}.reauth`, 'Reauthenticate', account.authKind, {
+    description:
+      'Run the provider login flow again and replace this stored credential in place. Label, weight, priority, and session pins stay; the account cooldown is cleared.',
+    submenu: (_currentValue, done) =>
+      new SelectSubmenu(
+        theme,
+        `Reauthenticate ${account.label}`,
+        'Choose the login method. The stored credential is replaced only after a successful login.',
+        methods.map(method => ({ value: method.value, label: method.label })),
+        preferredAuthMethod(account, methods) ?? methods[0]!.value,
+        (value) => done(`${REAUTH_SENTINEL_PREFIX}${value}`),
+        () => done(),
+      ),
+  })
+}
+
 function storedAccountRow(
   theme: Theme,
   account: MultiAuthAccount,
+  methods: readonly PoolManagerAuthMethod[],
   persist: (id: string, value: string) => void,
 ): SettingItem {
   return setting(`stored.${account.id}`, account.label, accountSummary(account), {
@@ -255,6 +300,7 @@ function storedAccountRow(
           description: PRIORITY_DESCRIPTION,
           submenu: integerInputSubmenu(theme, 'Priority', PRIORITY_DESCRIPTION, 0),
         }),
+        ...(methods.length === 0 ? [] : [reauthRow(theme, account, methods, persist)]),
         setting(`account.${account.id}.remove`, 'Remove account', '', {
           description: 'Permanently deletes this stored credential.',
           submenu: (_currentValue, done) =>
@@ -298,7 +344,7 @@ function accountsSection(
 ): SettingItem {
   const rows: SettingItem[] = []
   if (state.poolExists || state.upstreamConfigured === true) rows.push(upstreamRow(theme, state, persist))
-  for (const account of state.accounts) rows.push(storedAccountRow(theme, account, persist))
+  for (const account of state.accounts) rows.push(storedAccountRow(theme, account, methods, persist))
   if (rows.length === 0) {
     rows.push(setting('accounts.none', 'No accounts yet', '', {
       description: 'Use the Add account row below to store a credential for this pool.',
@@ -518,12 +564,22 @@ export async function openPoolManager(
         )
         return
       }
-      const accountMatch = /^account\.([^.]+)\.(label|enabled|weight|priority|remove)$/.exec(id)
+      const accountMatch = /^account\.([^.]+)\.(label|enabled|weight|priority|remove|reauth)$/.exec(id)
       if (accountMatch === null) return
       const accountId = accountMatch[1]!
       const field = accountMatch[2]!
       if (field === 'remove') {
         if (value === REMOVE_SENTINEL) await callbacks.removeAccount(accountId)
+        return
+      }
+      if (field === 'reauth') {
+        if (value.startsWith(REAUTH_SENTINEL_PREFIX)) {
+          exit({
+            type: 'reauth',
+            accountId,
+            method: value.slice(REAUTH_SENTINEL_PREFIX.length),
+          })
+        }
         return
       }
       if (field === 'label') {

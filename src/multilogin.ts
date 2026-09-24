@@ -354,9 +354,14 @@ export async function promptApiKeyCredential(
   return { credential: { type: 'api_key', key } }
 }
 
+export interface LoginDialogOptions {
+  title?: string
+}
+
 export async function showLoginDialog(
   ctx: ExtensionContext,
   selection: LoginSelection,
+  options: LoginDialogOptions = {},
 ): Promise<LoginDialogResult> {
   return ctx.ui.custom<LoginDialogResult>((tui, _theme, _keybindings, done) => {
     let finished = false
@@ -370,7 +375,7 @@ export async function showLoginDialog(
       selection.provider.id,
       () => finish(undefined),
       selection.provider.name,
-      `Add ${selection.provider.name} account`,
+      options.title ?? `Add ${selection.provider.name} account`,
     )
     const interaction: ProviderAuthInteraction = {
       signal: host.dialog.signal,
