@@ -141,7 +141,7 @@ async function launch(
       providers.push(provider)
       registry.set(provider.id, provider)
     },
-    unregisterProvider() {},
+    unregisterProvider(id: string) { registry.delete(id) },
     getAllTools: () => [],
     registerCommand(name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) {
       commands.set(name, def)
@@ -324,7 +324,7 @@ describe('/switch-account survival across resume', () => {
   it('hands the registry to the newest live lift in whatever order sessions end', async () => {
     // Earlier tests leave their sessions running; start from a clean process.
     (globalThis as unknown as Record<symbol, Map<string, unknown>>)[
-      Symbol.for('pi-multiprovider.live-lifts')
+      Symbol.for('pi-multiprovider.live-providers')
     ]?.delete(base.id)
     const registry = new Map<string, Provider<'probe-api'>>([[base.id, base]])
     const parent = await launch([], registry)
@@ -342,6 +342,28 @@ describe('/switch-account survival across resume', () => {
     await second.stop()
     expect(registry.get(base.id)).toBe(parent.providers.at(-1))
     expect(await request()).not.toMatch(/unknown provider|stale/)
+  })
+
+  it('keeps the parent virtual provider registered when a subagent session ends', async () => {
+    await store.saveVirtualProvider({
+      id: 'pooled',
+      label: 'Pooled',
+      models: [{ id: 'ultra', backends: [{ providerId: base.id, modelId: model.id }] }],
+    })
+    try {
+      const registry = new Map<string, Provider<'probe-api'>>([[base.id, base]])
+      const parent = await launch([], registry)
+      await parent.start()
+      const child = await launch([], registry)
+      await child.start()
+
+      await child.stop()
+      expect(registry.get('pooled')).toBe(parent.providers.findLast(provider => provider.id === 'pooled'))
+      await parent.stop()
+      expect(registry.has('pooled')).toBe(false)
+    } finally {
+      await store.removeVirtualProvider('pooled')
+    }
   })
 })
 

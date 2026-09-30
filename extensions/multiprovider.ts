@@ -555,11 +555,12 @@ function uniqueProviders(
 // Pi loads one instance of this extension per session, and subagent sessions
 // share the parent's provider registry. Each instance lifts the real base
 // provider, never another instance's lift, so shutting one instance down cannot
-// break a chain of wrappers. This process-wide list of live lifts decides what a
-// departing instance hands the registry back to, in whatever order sessions end.
+// break a chain of wrappers. This process-wide list of live registrations (lifts
+// and virtual providers) decides what a departing instance hands the registry
+// back to, in whatever order sessions end.
 const LIFTED_BASE = Symbol.for('pi-multiprovider.lifted-base')
-const liveLifts: Map<string, Provider<Api>[]> = ((globalThis as unknown as Record<symbol, Map<string, Provider<Api>[]> | undefined>)[
-  Symbol.for('pi-multiprovider.live-lifts')
+const liveProviders: Map<string, Provider<Api>[]> = ((globalThis as unknown as Record<symbol, Map<string, Provider<Api>[]> | undefined>)[
+  Symbol.for('pi-multiprovider.live-providers')
 ] ??= new Map())
 
 const realBase = (provider: Provider<Api> | undefined): Provider<Api> | undefined => {
@@ -570,17 +571,17 @@ const realBase = (provider: Provider<Api> | undefined): Provider<Api> | undefine
   return base
 }
 
-/** Swaps `previous` for `next` among the live lifts and returns the newest one left. */
-const replaceLiveLift = (
+/** Swaps `previous` for `next` among the live registrations and returns the newest one left. */
+const replaceLiveProvider = (
   providerId: string,
   previous: Provider<Api> | undefined,
   next?: Provider<Api>,
 ): Provider<Api> | undefined => {
-  const lifts = (liveLifts.get(providerId) ?? []).filter(lift => lift !== previous)
-  if (next !== undefined) lifts.push(next)
-  if (lifts.length === 0) liveLifts.delete(providerId)
-  else liveLifts.set(providerId, lifts)
-  return lifts.at(-1)
+  const live = (liveProviders.get(providerId) ?? []).filter(provider => provider !== previous)
+  if (next !== undefined) live.push(next)
+  if (live.length === 0) liveProviders.delete(providerId)
+  else liveProviders.set(providerId, live)
+  return live.at(-1)
 }
 
 export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
@@ -729,7 +730,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const base = baseProviders.get(providerId)
     const installed = installedProviders.get(providerId)
     const current = ctx?.modelRegistry.getProvider(providerId)
-    const newestLiveLift = replaceLiveLift(providerId, installed)
+    const newestLiveLift = replaceLiveProvider(providerId, installed)
     if (base !== undefined && (ctx === undefined || current === installed)) pi.registerProvider(newestLiveLift ?? base)
     installedProviders.delete(providerId)
     baseProviders.delete(providerId)
@@ -787,7 +788,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       onFailover: handleFailover,
     })
     Object.defineProperty(lifted, LIFTED_BASE, { value: base })
-    replaceLiveLift(providerId, priorLift, lifted)
+    replaceLiveProvider(providerId, priorLift, lifted)
     pi.registerProvider(lifted)
     baseProviders.set(providerId, base)
     installedProviders.set(providerId, lifted)
@@ -838,6 +839,8 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       if (prior !== undefined) unregisterVirtualModels(prior)
       virtualConfigs.delete(providerId)
       if (virtualProviders.has(providerId)) {
+        // Deleted from the shared store: every session's registration is obsolete.
+        liveProviders.delete(providerId)
         pi.unregisterProvider(providerId)
         virtualProviders.delete(providerId)
       }
@@ -906,6 +909,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           }
         },
       })
+      replaceLiveProvider(config.id, virtualProviders.get(config.id), virtualProvider)
       pi.registerProvider(virtualProvider)
       virtualProviders.set(config.id, virtualProvider)
       virtualConfigs.set(config.id, config)
@@ -1047,7 +1051,13 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     for (const providerId of installedProviders.keys()) restoreProvider(providerId, currentContext)
     managedIntegrations.clear()
     managedBases.clear()
-    for (const providerId of virtualProviders.keys()) pi.unregisterProvider(providerId)
+    for (const [providerId, provider] of virtualProviders) {
+      const newest = replaceLiveProvider(providerId, provider)
+      // Another live session registered this id after us; leave its registration.
+      if (currentModelRegistry !== undefined && currentModelRegistry.getProvider(providerId) !== provider) continue
+      if (newest === undefined) pi.unregisterProvider(providerId)
+      else pi.registerProvider(newest)
+    }
     virtualProviders.clear()
     virtualIntegrations.clear()
     virtualConfigs.clear()
