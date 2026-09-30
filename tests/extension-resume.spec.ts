@@ -70,13 +70,19 @@ interface ExtensionHarness {
   ctx: ExtensionContext & { model?: Model<'probe-api'> }
   active(poolId: string): Promise<unknown>
   start(): Promise<void>
+  stop(): Promise<void>
   switchAccount(args: string): Promise<void>
 }
 
 // Boots the real bundled extension against duck-typed Pi APIs: provider
 // registration, the event bus, session entries, and the TUI context surface
 // that /switch-account and session_start touch.
-async function launch(initialEntries: readonly unknown[]): Promise<ExtensionHarness> {
+// `registry` stands in for Pi's provider registry; sessions of one process,
+// subagents included, share it.
+async function launch(
+  initialEntries: readonly unknown[],
+  registry = new Map<string, Provider<'probe-api'>>([[base.id, base]]),
+): Promise<ExtensionHarness> {
   const entries: unknown[] = [...initialEntries]
   const notifications: string[] = []
   const providers: Provider<'probe-api'>[] = []
@@ -100,7 +106,7 @@ async function launch(initialEntries: readonly unknown[]): Promise<ExtensionHarn
     cwd: process.cwd(),
     sessionManager: { getSessionId: () => 'session-1', getEntries: () => entries },
     modelRegistry: {
-      getProvider: (id: string) => (id === base.id ? base : undefined),
+      getProvider: (id: string) => registry.get(id),
       getAll: () => [model],
       getApiKeyAndHeaders: async () => ({ ok: true }),
     },
@@ -131,7 +137,10 @@ async function launch(initialEntries: readonly unknown[]): Promise<ExtensionHarn
       list.push(handler as (event: unknown, ctx: unknown) => Promise<void> | void)
       handlers.set(name, list)
     },
-    registerProvider(provider: Provider<'probe-api'>) { providers.push(provider) },
+    registerProvider(provider: Provider<'probe-api'>) {
+      providers.push(provider)
+      registry.set(provider.id, provider)
+    },
     unregisterProvider() {},
     getAllTools: () => [],
     registerCommand(name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) {
@@ -175,6 +184,11 @@ async function launch(initialEntries: readonly unknown[]): Promise<ExtensionHarn
       ctx.model = model
       for (const handler of handlers.get('session_start') ?? []) {
         await handler({ type: 'session_start', reason: 'startup' }, ctx)
+      }
+    },
+    async stop() {
+      for (const handler of handlers.get('session_shutdown') ?? []) {
+        await handler({ type: 'session_shutdown', reason: 'quit' }, ctx)
       }
     },
     async switchAccount(args) {
@@ -305,6 +319,29 @@ describe('/switch-account survival across resume', () => {
       if (previous === undefined) delete process.env.PI_MULTIPROVIDER_SESSION_PINS
       else process.env.PI_MULTIPROVIDER_SESSION_PINS = previous
     }
+  })
+
+  it('hands the registry to the newest live lift in whatever order sessions end', async () => {
+    // Earlier tests leave their sessions running; start from a clean process.
+    (globalThis as unknown as Record<symbol, Map<string, unknown>>)[
+      Symbol.for('pi-multiprovider.live-lifts')
+    ]?.delete(base.id)
+    const registry = new Map<string, Provider<'probe-api'>>([[base.id, base]])
+    const parent = await launch([], registry)
+    await parent.start()
+    const first = await launch([], registry)
+    await first.start()
+    const second = await launch([], registry)
+    await second.start()
+    const request = async () =>
+      (await registry.get(base.id)!.streamSimple(model, normalizeContext({ messages: [] })).result()).errorMessage
+
+    // Pi-subagents disposes finished subagents on a timer, oldest first.
+    await first.stop()
+    expect(await request()).not.toMatch(/unknown provider|stale/)
+    await second.stop()
+    expect(registry.get(base.id)).toBe(parent.providers.at(-1))
+    expect(await request()).not.toMatch(/unknown provider|stale/)
   })
 })
 

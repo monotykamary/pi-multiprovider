@@ -552,6 +552,37 @@ function uniqueProviders(
   return providers.sort((left, right) => left.name.localeCompare(right.name))
 }
 
+// Pi loads one instance of this extension per session, and subagent sessions
+// share the parent's provider registry. Each instance lifts the real base
+// provider, never another instance's lift, so shutting one instance down cannot
+// break a chain of wrappers. This process-wide list of live lifts decides what a
+// departing instance hands the registry back to, in whatever order sessions end.
+const LIFTED_BASE = Symbol.for('pi-multiprovider.lifted-base')
+const liveLifts: Map<string, Provider<Api>[]> = ((globalThis as unknown as Record<symbol, Map<string, Provider<Api>[]> | undefined>)[
+  Symbol.for('pi-multiprovider.live-lifts')
+] ??= new Map())
+
+const realBase = (provider: Provider<Api> | undefined): Provider<Api> | undefined => {
+  let base = provider
+  while (base !== undefined && LIFTED_BASE in base) {
+    base = (base as Provider<Api> & { [LIFTED_BASE]: Provider<Api> })[LIFTED_BASE]
+  }
+  return base
+}
+
+/** Swaps `previous` for `next` among the live lifts and returns the newest one left. */
+const replaceLiveLift = (
+  providerId: string,
+  previous: Provider<Api> | undefined,
+  next?: Provider<Api>,
+): Provider<Api> | undefined => {
+  const lifts = (liveLifts.get(providerId) ?? []).filter(lift => lift !== previous)
+  if (next !== undefined) lifts.push(next)
+  if (lifts.length === 0) liveLifts.delete(providerId)
+  else liveLifts.set(providerId, lifts)
+  return lifts.at(-1)
+}
+
 export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   const service = new MultiProviderService()
   const store = new MultiAuthStore()
@@ -698,7 +729,8 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const base = baseProviders.get(providerId)
     const installed = installedProviders.get(providerId)
     const current = ctx?.modelRegistry.getProvider(providerId)
-    if (base !== undefined && (ctx === undefined || current === installed)) pi.registerProvider(base)
+    const newestLiveLift = replaceLiveLift(providerId, installed)
+    if (base !== undefined && (ctx === undefined || current === installed)) pi.registerProvider(newestLiveLift ?? base)
     installedProviders.delete(providerId)
     baseProviders.delete(providerId)
     registeredIntegrations.delete(providerId)
@@ -715,7 +747,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
 
     const current = ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
     const priorLift = installedProviders.get(providerId)
-    const base = current === priorLift ? baseProviders.get(providerId) : current
+    const base = realBase(current === priorLift ? baseProviders.get(providerId) : current)
     if (base === undefined) {
       if (!warnedMissing.has(providerId)) {
         warnedMissing.add(providerId)
@@ -754,6 +786,8 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       affinityKey,
       onFailover: handleFailover,
     })
+    Object.defineProperty(lifted, LIFTED_BASE, { value: base })
+    replaceLiveLift(providerId, priorLift, lifted)
     pi.registerProvider(lifted)
     baseProviders.set(providerId, base)
     installedProviders.set(providerId, lifted)
@@ -771,7 +805,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     for (const providerId of storedIds) {
       const current = ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
       const priorLift = installedProviders.get(providerId)
-      const base = current === priorLift ? baseProviders.get(providerId) : current
+      const base = realBase(current === priorLift ? baseProviders.get(providerId) : current)
       if (base === undefined) continue
       if (managedBases.get(providerId) !== base) {
         managedBases.set(providerId, base)
