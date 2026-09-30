@@ -568,6 +568,18 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   const virtualProviders = new Map<string, Provider<Api>>()
   const virtualIntegrations = new Map<string, ProviderRegistration<VirtualBackendRef>>()
   let currentContext: ExtensionContext | undefined
+  // Provider callbacks run on every request and can outlive the context that
+  // registered them: a Pi subagent loads this extension into a child session
+  // that shares the parent's provider registry, and pi marks that session's
+  // context stale once it is disposed. Keep plain values for those callbacks;
+  // dereferencing a stale context throws and fails every later request.
+  let currentSessionId: string | undefined
+  let currentModelRegistry: ExtensionContext['modelRegistry'] | undefined
+  const trackContext = (ctx: ExtensionContext): void => {
+    currentContext = ctx
+    currentSessionId = ctx.sessionManager.getSessionId()
+    currentModelRegistry = ctx.modelRegistry
+  }
   let pendingSessionPins: SessionPin[] = []
   let pendingInheritedSessionPins: InheritedSessionPin[] = []
 
@@ -735,8 +747,8 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     }
 
     if (current === priorLift && baseProviders.get(providerId) === base) return
-    const affinityKey = integration.affinityKey
-      ?? (() => ctx.sessionManager.getSessionId())
+    const sessionId = ctx.sessionManager.getSessionId()
+    const affinityKey = integration.affinityKey ?? (() => sessionId)
     const lifted = liftProvider(base, service, {
       ...integration,
       affinityKey,
@@ -804,7 +816,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const resolveTemplate = (providerId: string, modelId: string): VirtualModelTemplate | undefined => {
       const provider = installedProviders.get(providerId)
         ?? baseProviders.get(providerId)
-        ?? currentContext?.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
+        ?? currentModelRegistry?.getProvider(providerId) as Provider<Api> | undefined
       const model = provider?.getModels().find(item => item.id === modelId)
       return model === undefined ? undefined : captureVirtualModelTemplate(model)
     }
@@ -823,11 +835,10 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       if (prior !== undefined) unregisterVirtualModels(prior)
 
       // Registration runs at extension load, before any session exists; the
-      // closures only dereference the context once a session is streaming.
-      const sessionContext = (): ExtensionContext | undefined => currentContext
+      // closures only read the session snapshot once a session is streaming.
       const providerLabel = (providerId: string): string | undefined =>
         baseProviders.get(providerId)?.name
-        ?? sessionContext()?.modelRegistry.getProvider(providerId)?.name
+        ?? currentModelRegistry?.getProvider(providerId)?.name
 
       const integrations = createVirtualIntegrations(config, { getProviderLabel: providerLabel })
       for (const integration of integrations) {
@@ -840,17 +851,17 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         service,
         config,
         onFailover: handleFailover,
-        getAffinityKey: () => sessionContext()?.sessionManager.getSessionId() ?? '',
+        getAffinityKey: () => currentSessionId ?? '',
         getBackingProvider: providerId =>
           installedProviders.get(providerId)
           ?? baseProviders.get(providerId)
-          ?? sessionContext()?.modelRegistry.getProvider(providerId) as Provider<Api> | undefined,
+          ?? currentModelRegistry?.getProvider(providerId) as Provider<Api> | undefined,
         isBackendConfigured: providerId =>
-          sessionContext()?.modelRegistry.getProviderAuthStatus(providerId).configured ?? true,
+          currentModelRegistry?.getProviderAuthStatus(providerId).configured ?? true,
         resolveAmbientAuth: async (_providerId, model, signal) => {
-          const context = sessionContext()
-          if (context === undefined) return { ok: false, error: 'multiprovider: session not ready' }
-          const resolution = await context.modelRegistry.getApiKeyAndHeaders(model)
+          const registry = currentModelRegistry
+          if (registry === undefined) return { ok: false, error: 'multiprovider: session not ready' }
+          const resolution = await registry.getApiKeyAndHeaders(model)
           if (!resolution.ok) return { ok: false, error: resolution.error }
           return {
             ok: true,
@@ -983,7 +994,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   })
 
   pi.on('session_start', async (_event, ctx) => {
-    currentContext = ctx
+    trackContext(ctx)
     pendingSessionPins = sessionPinsFromEntries(ctx.sessionManager.getEntries())
     const recordedPools = new Set(pendingSessionPins.map(pin => pin.pool))
     pendingInheritedSessionPins = inheritedSessionPinsFromEnv(process.env)
@@ -993,7 +1004,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   })
 
   pi.on('before_agent_start', async (_event, ctx) => {
-    currentContext = ctx
+    trackContext(ctx)
     await reconcile(ctx)
   })
 

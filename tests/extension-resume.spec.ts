@@ -1,7 +1,7 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createProvider, type Model, type Provider } from '@earendil-works/pi-ai'
+import { createProvider, normalizeContext, type Model, type Provider } from '@earendil-works/pi-ai'
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent'
 import { describe, expect, it } from 'vitest'
 
@@ -65,6 +65,7 @@ interface Announcement {
 interface ExtensionHarness {
   entries: unknown[]
   notifications: string[]
+  providers: Provider<'probe-api'>[]
   accountChanges: AccountChangedEvent[]
   ctx: ExtensionContext & { model?: Model<'probe-api'> }
   active(poolId: string): Promise<unknown>
@@ -78,6 +79,7 @@ interface ExtensionHarness {
 async function launch(initialEntries: readonly unknown[]): Promise<ExtensionHarness> {
   const entries: unknown[] = [...initialEntries]
   const notifications: string[] = []
+  const providers: Provider<'probe-api'>[] = []
   const handlers = new Map<string, ((event: unknown, ctx: unknown) => Promise<void> | void)[]>()
   const bus = new Map<string, Set<(value: unknown) => void>>()
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>()
@@ -129,7 +131,7 @@ async function launch(initialEntries: readonly unknown[]): Promise<ExtensionHarn
       list.push(handler as (event: unknown, ctx: unknown) => Promise<void> | void)
       handlers.set(name, list)
     },
-    registerProvider() {},
+    registerProvider(provider: Provider<'probe-api'>) { providers.push(provider) },
     unregisterProvider() {},
     getAllTools: () => [],
     registerCommand(name: string, def: { handler: (args: string, ctx: unknown) => Promise<void> }) {
@@ -164,6 +166,7 @@ async function launch(initialEntries: readonly unknown[]): Promise<ExtensionHarn
 
   return {
     entries,
+    providers,
     notifications,
     accountChanges,
     ctx,
@@ -302,5 +305,25 @@ describe('/switch-account survival across resume', () => {
       if (previous === undefined) delete process.env.PI_MULTIPROVIDER_SESSION_PINS
       else process.env.PI_MULTIPROVIDER_SESSION_PINS = previous
     }
+  })
+})
+
+describe('provider callbacks after the session context goes stale', () => {
+  // A Pi subagent loads the extension into a child session that shares the
+  // parent's provider registry. Once pi disposes that session, every getter on
+  // its context throws, but the provider it lifted can still serve requests.
+  it('keeps the lifted provider usable', async () => {
+    const live = await launch([])
+    await live.start()
+    const lifted = live.providers.findLast(provider => provider.id === base.id && provider !== base)
+    expect(lifted).toBeDefined()
+    for (const key of ['sessionManager', 'modelRegistry'] as const) {
+      Object.defineProperty(live.ctx, key, {
+        get() { throw new Error('This extension ctx is stale') },
+      })
+    }
+
+    const result = await lifted!.streamSimple(model, normalizeContext({ messages: [] })).result()
+    expect(result.errorMessage).not.toMatch(/stale/)
   })
 })
