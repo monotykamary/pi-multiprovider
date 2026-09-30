@@ -67,6 +67,10 @@ function stateKey(providerId: string, accountId: string): string {
   return JSON.stringify([providerId, accountId])
 }
 
+function modelStateKey(providerId: string, modelId: string, accountId: string): string {
+  return JSON.stringify([providerId, modelId, accountId])
+}
+
 function statusFromFailure(failure: ProviderAttemptFailure): number | undefined {
   if (failure.status !== undefined) return failure.status
   const leading = failure.message.match(/^(?:http\s*)?(\d{3})(?::|\s|$)/i)
@@ -97,6 +101,7 @@ export class MultiProviderService {
   private readonly providers = new Map<string, ProviderRegistration>()
   private readonly preferences = new Map<string, PoolPreference>()
   private readonly runtime = new Map<string, RuntimeState>()
+  private readonly modelRuntime = new Map<string, RuntimeState>()
   private readonly selectionBias = new Map<string, SelectionBias>()
   private readonly affinity = new Map<string, Map<string, string>>()
   private readonly explicitAffinity = new Map<string, Set<string>>()
@@ -138,6 +143,7 @@ export class MultiProviderService {
       this.explicitAffinity.delete(registration.id)
       this.roundRobinCursor.delete(registration.id)
       this.smoothScores.delete(registration.id)
+      this.pruneModelRuntime(registration.id, () => false)
     }
   }
 
@@ -158,13 +164,17 @@ export class MultiProviderService {
     const excluded = new Set(options.excludeAccountIds ?? [])
     const now = this.now()
     const available = accounts.filter(item =>
-      item.enabled && item.runtime.cooldownUntil <= now && !excluded.has(item.account.id),
+      item.enabled
+      && this.blockingCooldowns(options.providerId, options.modelId, item.account.id, item.runtime, now).length === 0
+      && !excluded.has(item.account.id)
     )
 
     if (available.length === 0) {
       const future = accounts
-        .filter(item => item.enabled && !excluded.has(item.account.id) && item.runtime.cooldownUntil > now)
-        .map(item => item.runtime.cooldownUntil)
+        .filter(item => item.enabled && !excluded.has(item.account.id))
+        .map(item => this.blockingCooldowns(options.providerId, options.modelId, item.account.id, item.runtime, now))
+        .filter(cooldowns => cooldowns.length > 0)
+        .flat()
       throw new NoAccountAvailableError(
         options.providerId,
         future.length === 0 ? undefined : Math.min(...future),
@@ -219,9 +229,9 @@ export class MultiProviderService {
         if (released) return undefined
         released = true
         selected.runtime.inFlight = Math.max(0, selected.runtime.inFlight - 1)
-        if (outcome.status === 'success') this.recordSuccess(options.providerId, account.id)
+        if (outcome.status === 'success') this.recordSuccess(options.providerId, account.id, options.modelId)
         else if (outcome.status === 'failure') {
-          return this.recordFailure(registration, account, outcome.error)
+          return this.recordFailure(registration, account, options.modelId, outcome.error)
         }
         return undefined
       },
@@ -310,10 +320,12 @@ export class MultiProviderService {
   resetHealth(providerId: string, accountId: string): void {
     this.registration(providerId)
     const runtime = this.runtime.get(stateKey(providerId, accountId))
-    if (runtime === undefined) return
-    runtime.consecutiveFailures = 0
-    runtime.cooldownUntil = 0
-    delete runtime.lastFailureKind
+    if (runtime !== undefined) {
+      runtime.consecutiveFailures = 0
+      runtime.cooldownUntil = 0
+      delete runtime.lastFailureKind
+    }
+    this.pruneModelRuntime(providerId, id => id !== accountId)
   }
 
   async pinAccount(providerId: string, affinityKey: string, accountId: string): Promise<void> {
@@ -395,6 +407,16 @@ export class MultiProviderService {
     return runtime
   }
 
+  private modelRuntimeFor(providerId: string, modelId: string, accountId: string): RuntimeState {
+    const key = modelStateKey(providerId, modelId, accountId)
+    let runtime = this.modelRuntime.get(key)
+    if (runtime === undefined) {
+      runtime = { inFlight: 0, consecutiveFailures: 0, cooldownUntil: 0 }
+      this.modelRuntime.set(key, runtime)
+    }
+    return runtime
+  }
+
   private async effectiveAccounts(
     registration: ProviderRegistration,
     pool: PoolPreference,
@@ -402,6 +424,8 @@ export class MultiProviderService {
     const inventory = [...await registration.accounts()]
     const seen = new Set<string>()
     const preferences = new Map(pool.accounts.map(account => [account.accountId, account]))
+    const liveAccountIds = new Set(inventory.map(account => account.id))
+    this.pruneModelRuntime(registration.id, id => liveAccountIds.has(id))
     return inventory.map(account => {
       if (account.id.trim() === '') {
         throw new Error(`multiprovider: provider "${registration.id}" returned an empty account id`)
@@ -490,16 +514,47 @@ export class MultiProviderService {
     return selected
   }
 
-  private recordSuccess(providerId: string, accountId: string): void {
+  // Cooldowns currently blocking one account for one model: the account-wide
+  // one (which applies to every model) plus the matching account-model one.
+  // An empty result means the account is eligible for this model right now.
+  private blockingCooldowns(
+    providerId: string,
+    modelId: string | undefined,
+    accountId: string,
+    runtime: RuntimeState,
+    now: number,
+  ): number[] {
+    const blocking: number[] = []
+    if (runtime.cooldownUntil > now) blocking.push(runtime.cooldownUntil)
+    if (modelId !== undefined) {
+      const modelCooldown = this.modelRuntime.get(modelStateKey(providerId, modelId, accountId))?.cooldownUntil ?? 0
+      if (modelCooldown > now) blocking.push(modelCooldown)
+    }
+    return blocking
+  }
+
+  // Drops model-scoped health evidence for a provider, narrowed by a keep
+  // predicate over account ids so account removal, health reset, and
+  // inventory drift all clean up through one path.
+  private pruneModelRuntime(providerId: string, keep: (accountId: string) => boolean): void {
+    for (const key of this.modelRuntime.keys()) {
+      const [keyProviderId, _modelId, keyAccountId] = JSON.parse(key) as [string, string, string]
+      if (keyProviderId === providerId && !keep(keyAccountId)) this.modelRuntime.delete(key)
+    }
+  }
+
+  private recordSuccess(providerId: string, accountId: string, modelId?: string): void {
     const runtime = this.runtimeFor(providerId, accountId)
     runtime.consecutiveFailures = 0
     runtime.cooldownUntil = 0
     delete runtime.lastFailureKind
+    if (modelId !== undefined) this.modelRuntime.delete(modelStateKey(providerId, modelId, accountId))
   }
 
   private recordFailure(
     registration: ProviderRegistration,
     account: ProviderAccount,
+    modelId: string | undefined,
     failure: ProviderAttemptFailure,
   ): FailureDisposition {
     let disposition: FailureDisposition
@@ -509,7 +564,10 @@ export class MultiProviderService {
     } catch {
       disposition = { kind: 'fatal', retryable: false }
     }
-    const runtime = this.runtimeFor(registration.id, account.id)
+    const scope = disposition.scope ?? 'account'
+    const runtime = scope === 'account-model' && modelId !== undefined
+      ? this.modelRuntimeFor(registration.id, modelId, account.id)
+      : this.runtimeFor(registration.id, account.id)
     runtime.consecutiveFailures += 1
     runtime.lastFailureKind = disposition.kind
     const cooldown = disposition.cooldownMs
