@@ -484,7 +484,10 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot']>>): string[] {
+function statusLines(
+  snapshot: Awaited<ReturnType<MultiProviderService['snapshot']>>,
+  isCoreCredentialMissing: (providerId: string) => boolean = () => false,
+): string[] {
   const lines: string[] = []
   for (const provider of snapshot.providers) {
     lines.push(
@@ -492,6 +495,14 @@ function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot
       + `${provider.firstAccountBias ? ' · main-first' : ''}`
       + ` · affinity ${provider.affinity ? 'on' : 'off'}`,
     )
+    // Pi's /logout only removes the core /login credential, never pooled
+    // accounts, so a pool can outlive its logout. Flag it so the stale entry
+    // is visible instead of looking like an active login. A "fallback" source
+    // means the key is statically embedded by an extension (e.g. pi-cursor-sdk's
+    // non-functional placeholder), not a live login, so it counts as missing.
+    if (isCoreCredentialMissing(provider.id)) {
+      lines.push('  no live core /login credential (pool is separate from /logout; use /multilogout to remove)')
+    }
     if (provider.accounts.length === 0) {
       lines.push('  no accounts')
       continue
@@ -1258,7 +1269,11 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         ctx.ui.notify('No account pools are configured. Use /multilogin to add one.', 'info')
         return
       }
-      await ctx.ui.select('Provider Accounts', statusLines(snapshot))
+      const runtime = probeSessionRuntime(ctx)
+      await ctx.ui.select('Provider Accounts', statusLines(snapshot, providerId => {
+        const status = runtime?.getProviderAuthStatus(providerId)
+        return status?.configured === false || status?.source === 'fallback'
+      }))
     },
   })
 
