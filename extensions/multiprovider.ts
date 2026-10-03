@@ -552,6 +552,14 @@ function uniqueProviders(
   return providers.sort((left, right) => left.name.localeCompare(right.name))
 }
 
+// Pi rebuilds a provider that has models.json or extension overlays into a new
+// object on every registration, and that object keeps only `headers` from the
+// registered provider by reference. Each lift therefore gets its own headers
+// object, so the registry's copy of a lift is still recognized as that lift.
+const isLiftOf = (current: Provider<Api> | undefined, lift: Provider<Api> | undefined): boolean =>
+  current !== undefined && lift !== undefined
+  && (current === lift || (lift.headers !== undefined && current.headers === lift.headers))
+
 export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   const service = new MultiProviderService()
   const store = new MultiAuthStore()
@@ -686,7 +694,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const base = baseProviders.get(providerId)
     const installed = installedProviders.get(providerId)
     const current = ctx?.modelRegistry.getProvider(providerId)
-    if (base !== undefined && (ctx === undefined || current === installed)) pi.registerProvider(base)
+    if (base !== undefined && (ctx === undefined || isLiftOf(current, installed))) pi.registerProvider(base)
     installedProviders.delete(providerId)
     baseProviders.delete(providerId)
     registeredIntegrations.delete(providerId)
@@ -703,7 +711,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
 
     const current = ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
     const priorLift = installedProviders.get(providerId)
-    const base = current === priorLift ? baseProviders.get(providerId) : current
+    const base = isLiftOf(current, priorLift) ? baseProviders.get(providerId) : current
     if (base === undefined) {
       if (!warnedMissing.has(providerId)) {
         warnedMissing.add(providerId)
@@ -734,14 +742,18 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       })
     }
 
-    if (current === priorLift && baseProviders.get(providerId) === base) return
+    if (isLiftOf(current, priorLift) && baseProviders.get(providerId) === base) return
     const affinityKey = integration.affinityKey
       ?? (() => ctx.sessionManager.getSessionId())
-    const lifted = liftProvider(base, service, {
-      ...integration,
-      affinityKey,
-      onFailover: handleFailover,
-    })
+    const lifted: Provider<Api> = {
+      ...liftProvider(base, service, {
+        ...integration,
+        affinityKey,
+        onFailover: handleFailover,
+      }),
+      // A headers object of its own lets isLiftOf() see through Pi's composition.
+      headers: { ...base.headers },
+    }
     pi.registerProvider(lifted)
     baseProviders.set(providerId, base)
     installedProviders.set(providerId, lifted)
@@ -759,7 +771,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     for (const providerId of storedIds) {
       const current = ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
       const priorLift = installedProviders.get(providerId)
-      const base = current === priorLift ? baseProviders.get(providerId) : current
+      const base = isLiftOf(current, priorLift) ? baseProviders.get(providerId) : current
       if (base === undefined) continue
       if (managedBases.get(providerId) !== base) {
         managedBases.set(providerId, base)
