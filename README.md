@@ -95,7 +95,7 @@ The flow:
 3. The **Add account** row asks for a non-secret label and runs the provider's own login implementation—including pasting an API key for providers without an interactive flow—then returns to the manager.
 4. Every other row edits live settings: pool strategy and session affinity, an **Accounts** section grouping every pooled credential—**Pi default (upstream)** plus stored accounts—with per-account weight (traffic share) and priority (failover order), and scheduler cooldowns.
 
-Add as many accounts as you need from the same manager. Remove credentials from an account's submenu or with `/multilogout`; Pi's regular `/logout` and `auth.json` remain independent. **Reauthenticate** in a stored account's submenu re-runs the provider's own login flow and replaces that account's credential in place — label, weight, priority, and session pins stay, and the account's cooldown clears. Use it when a provider revokes or invalidates a refresh token (for example `refresh_token_invalidated`) instead of removing and re-adding the account.
+Add as many accounts as you need from the same manager. Remove credentials from an account's submenu or with `/multilogout`; Pi's regular `/logout` and `auth.json` remain independent — logging out of a provider with `/logout` does not remove its pooled accounts, and removing pooled accounts does not touch the `/login` credential. `/accounts` flags pooled providers with no live core `/login` credential (missing, or an unresolved extension-embedded placeholder key) so a pool that outlived its logout reads as stale instead of active. **Reauthenticate** in a stored account's submenu re-runs the provider's own login flow and replaces that account's credential in place — label, weight, priority, and session pins stay, and the account's cooldown clears. Use it when a provider revokes or invalidates a refresh token (for example `refresh_token_invalidated`) instead of removing and re-adding the account.
 
 ### Commands
 
@@ -104,7 +104,7 @@ Add as many accounts as you need from the same manager. Remove credentials from 
 | `/multilogin [provider]` | Open the pool manager: strategy, affinity, upstream, account, and scheduler settings, plus adding or removing accounts. |
 | `/multilogout [provider]` | Remove an account saved by `/multilogin`. |
 | `/vprovider [id]` | Create and edit virtual providers that map one model across multiple provider models. |
-| `/accounts` | Inspect pool policy, account status, in-flight leases, failures, and cooldowns. |
+| `/accounts` | Inspect pool policy, account status, in-flight leases, failures, cooldowns, and providers missing their core `/login` credential. |
 | `/switch-account [label]` | Pin this session to one pooled account of the current model's provider, or return to automatic selection. The choice is restored the next time the session is resumed. |
 
 ## Pool strategies
