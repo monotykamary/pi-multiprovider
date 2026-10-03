@@ -124,7 +124,7 @@ Session affinity can pin a healthy account to the current Pi session. Explicit r
 
 A rejected account is not abandoned on the first error. Each stream absorbs up to `errorsBeforeSwitch` (default **3**, configurable in the `/multilogin` Scheduler panel) pre-output errors on the same account—separated by a short pause—before releasing the lease, applying the failure cooldown, and moving to the next account. Errors after output has started and non-retryable failures surface immediately, exactly as before.
 
-When [pi-fabric](https://github.com/monotykamary/pi-fabric) is installed, failing over to a different account first compacts the session with fabric's deterministic, LLM-free compaction engine. The failing request surfaces its error, the session compacts while the retry backoff runs, and the retry lands on the next account with a small context instead of a huge cold prefill. This is the default behavior; without fabric installed, streams rotate accounts inline as before.
+When [pi-fabric](https://github.com/monotykamary/pi-fabric) is installed, failures that Pi can automatically retry first compact the session with fabric's deterministic, LLM-free compaction engine. The failing request surfaces its error, the session compacts while the retry backoff runs, and the retry lands on the next account with a small context instead of a huge cold prefill. Account-local failures that Pi will not retry, such as quota exhaustion or invalid credentials, rotate accounts inline instead of surfacing an error that would stop the request. Without fabric installed, streams rotate accounts inline as before.
 
 ## Virtual providers
 
