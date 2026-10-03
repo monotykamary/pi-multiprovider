@@ -1,5 +1,6 @@
 import type { Api, AuthType, Credential, Model, Provider } from '@earendil-works/pi-ai'
 import { normalizeContext } from '@earendil-works/pi-ai'
+import { isRetryableAssistantError } from '@earendil-works/pi-ai/compat'
 import {
   DynamicBorder,
   type ExtensionAPI,
@@ -678,6 +679,10 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const integration = effectiveIntegration(info.providerId)
     const handled = integration?.onFailover?.(info) === true
     if (!isFabricCompactionAvailable()) return handled
+    // Compaction surfaces the failure and relies on Pi to restart the turn.
+    // Quota/auth failures are not host-retryable, so keep rotating inline.
+    if (info.failure.assistantMessage === undefined
+      || !isRetryableAssistantError(info.failure.assistantMessage)) return handled
     void runFailoverCompaction(info)
     return true
   }
