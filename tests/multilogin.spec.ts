@@ -20,6 +20,8 @@ import {
   isWatchedAuthFileName,
   LoginDialogHostComponent,
   loginCredential,
+  pendingUpstreamProviders,
+  pendingUpstreamStatusLines,
   shouldSaveAsUpstreamOnly,
   shouldWarnUpstreamDuplicate,
   showLoginDialog,
@@ -334,6 +336,45 @@ describe('upstream-first first add', () => {
     expect(message).toContain('Antigravity')
     expect(message).toContain('upstream')
     expect(message).toContain('/multilogin')
+  })
+
+  it('upstream-only notice names the discarded label when one was typed', () => {
+    const message = upstreamOnlyNotice('Antigravity', 'bn')
+    expect(message).toContain('"bn"')
+    expect(message).toContain('not kept')
+  })
+})
+
+describe('pending upstream providers', () => {
+  const all = [
+    { id: 'antigravity', label: 'Antigravity' },
+    { id: 'openai', label: 'OpenAI' },
+    { id: 'cursor', label: 'Cursor' },
+  ]
+
+  it('lists configured providers that have no pool', () => {
+    const pending = pendingUpstreamProviders(
+      all,
+      new Set(['openai']),
+      id => id !== 'cursor',
+    )
+    expect(pending).toEqual([{ id: 'antigravity', label: 'Antigravity' }])
+  })
+
+  it('is empty when every configured provider already has a pool', () => {
+    expect(pendingUpstreamProviders(
+      all,
+      new Set(['antigravity', 'openai', 'cursor']),
+      () => true,
+    )).toEqual([])
+  })
+
+  it('renders pending rows without claiming an account identity', () => {
+    const lines = pendingUpstreamStatusLines([{ id: 'antigravity', label: 'Antigravity' }])
+    expect(lines).toEqual([
+      'Antigravity (antigravity) · no pool yet',
+      '  Pi default (upstream) · native credential, not pooled · next /multilogin add starts the pool',
+    ])
   })
 })
 
