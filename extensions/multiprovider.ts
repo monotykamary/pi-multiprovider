@@ -51,7 +51,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { changedWatchedAuthFiles, isUpstreamConfigured, markerPendingUpstreamIds, pendingUpstreamProviders, pendingUpstreamStatusLines, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
+import { attributeChangedFilesToSecrets, attributableSecrets, changedWatchedAuthFiles, isUpstreamConfigured, markerPendingUpstreamIds, pendingUpstreamProviders, pendingUpstreamStatusLines, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -1202,12 +1202,26 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               ctx.ui.notify(`Failed to reauthenticate ${account.label}: ${login.error.message}`, 'error')
             } else if (login !== undefined) {
               let credential: Credential | undefined = login.credential
-              const reauthBackfilledNative = reauthWatchBefore === undefined
-                ? false
+              const reauthChanged = reauthWatchBefore === undefined
+                ? []
                 : changedWatchedAuthFiles(
                     reauthWatchBefore,
                     await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE]),
-                  ).length > 0
+                  )
+              // Attribute the rewrite to this login when possible: with
+              // secrets to check, only files containing one count, so a
+              // concurrent unrelated rewrite no longer counts. Attribution
+              // is impossible without secrets (or when the store cannot be
+              // read); only then keep the raw change heuristic.
+              const reauthSecrets = credential === undefined ? [] : attributableSecrets(credential)
+              const reauthAttributed = reauthSecrets.length === 0
+                ? reauthChanged
+                : await attributeChangedFilesToSecrets(
+                    dirname(getMultiAuthPath()),
+                    reauthChanged,
+                    reauthSecrets,
+                  )
+              const reauthBackfilledNative = reauthAttributed.length > 0
               try {
                 await store.replaceAccountCredential(provider.id, account.id, credential)
                 credential = undefined
@@ -1251,7 +1265,16 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               const upstreamAfter = isUpstreamConfigured(ctx, provider.id)
               const authFilesAfter = await snapshotWatchedAuthFiles(agentDir, [MULTIPROVIDER_AUTH_FILE])
               const changedAuthFiles = changedWatchedAuthFiles(authFilesBefore, authFilesAfter)
-              const providerBackfilledNative = changedAuthFiles.length > 0
+              // Attribute the rewrite to this login when possible: with
+              // secrets to check, only files containing one count, so a
+              // concurrent unrelated rewrite no longer counts. Attribution
+              // is impossible without secrets (or when the store cannot be
+              // read); only then keep the raw change heuristic.
+              const addSecrets = credential === undefined ? [] : attributableSecrets(credential)
+              const attributedAuthFiles = addSecrets.length === 0
+                ? changedAuthFiles
+                : await attributeChangedFilesToSecrets(agentDir, changedAuthFiles, addSecrets)
+              const providerBackfilledNative = attributedAuthFiles.length > 0
                 || (!upstreamBefore && upstreamAfter)
               const saveAsUpstreamOnly = shouldSaveAsUpstreamOnly({
                 poolExistedBefore,
@@ -1265,7 +1288,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                 // /accounts and /multilogout would have no trace of it.
                 // Status-flip-only backfills (no file changed) need no
                 // marker: core status already sees those at display time.
-                if (changedAuthFiles.length > 0) await store.markUpstreamOnly(provider.id, changedAuthFiles)
+                if (attributedAuthFiles.length > 0) await store.markUpstreamOnly(provider.id, attributedAuthFiles)
                 await reconcile(ctx)
                 ctx.ui.notify(upstreamOnlyNotice(provider.name, label), 'info')
               } else {

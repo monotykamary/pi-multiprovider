@@ -15,6 +15,8 @@ import {
 import type { TUI } from '@earendil-works/pi-tui'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  attributableSecrets,
+  attributeChangedFilesToSecrets,
   changedWatchedAuthFiles,
   isUpstreamConfigured,
   isWatchedAuthFileName,
@@ -455,7 +457,7 @@ describe('watched auth files', () => {
     expect(isWatchedAuthFileName('.multiprovider-auth.json.123.abc.tmp')).toBe(false)
   })
 
-  it('detects a native store created or rewritten across snapshots', async () => {
+  it('detects a native store created or rewritten with different content', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'multiprovider-watch-'))
     try {
       const before = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
@@ -464,10 +466,52 @@ describe('watched auth files', () => {
       await writeFile(join(dir, 'models-store.json'), '{}')
       const afterCreate = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
       expect(changedWatchedAuthFiles(before, afterCreate)).toEqual(['antigravity-accounts.json'])
-      const past = new Date(Date.now() - 60_000)
-      await utimes(join(dir, 'antigravity-accounts.json'), past, past)
+      await writeFile(join(dir, 'antigravity-accounts.json'), '{"accounts":{"a":1}}')
       const afterRewrite = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
       expect(changedWatchedAuthFiles(afterCreate, afterRewrite)).toEqual(['antigravity-accounts.json'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('ignores same-content rewrites that only touch metadata', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'multiprovider-watch-'))
+    try {
+      await writeFile(join(dir, 'antigravity-accounts.json'), '{"accounts":{}}')
+      const before = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
+      const past = new Date(Date.now() - 60_000)
+      await utimes(join(dir, 'antigravity-accounts.json'), past, past)
+      const after = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
+      expect(changedWatchedAuthFiles(before, after)).toEqual([])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to metadata when content hashes are unavailable', () => {
+    const before = { 'auth.json': { mtimeMs: 1, size: 10 } }
+    expect(changedWatchedAuthFiles(before, { 'auth.json': { mtimeMs: 2, size: 10 } })).toEqual(['auth.json'])
+    expect(changedWatchedAuthFiles(before, { 'auth.json': { mtimeMs: 1, size: 10 } })).toEqual([])
+  })
+
+  it('extracts attributable secrets from fresh credentials', () => {
+    expect(attributableSecrets({ type: 'oauth', refresh: 'r', access: 'a', expires: 1 })).toEqual(['r', 'a'])
+    expect(attributableSecrets({ type: 'oauth', refresh: '', access: '', expires: 1 })).toEqual([])
+    expect(attributableSecrets({ type: 'api_key', key: 'k' })).toEqual(['k'])
+    expect(attributableSecrets({ type: 'api_key' })).toEqual([])
+  })
+
+  it('attributes only changed files containing a fresh secret', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'multiprovider-attribute-'))
+    try {
+      await writeFile(join(dir, 'native-accounts.json'), JSON.stringify({ refresh: 'fresh-refresh-token' }))
+      await writeFile(join(dir, 'other-auth.json'), JSON.stringify({ refresh: 'someone-elses-token' }))
+      expect(await attributeChangedFilesToSecrets(
+        dir,
+        ['native-accounts.json', 'other-auth.json', 'gone-auth.json'],
+        ['fresh-refresh-token'],
+      )).toEqual(['native-accounts.json'])
+      expect(await attributeChangedFilesToSecrets(dir, ['native-accounts.json'], [])).toEqual([])
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
