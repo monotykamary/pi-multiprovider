@@ -1037,11 +1037,17 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   ): Promise<{ id: string; label: string }[]> => {
     const runtime = probeSessionRuntime(ctx)
     const all = uniqueProviders(ctx, baseProviders).map(provider => ({ id: provider.id, label: provider.name }))
-    const ids = new Set(pendingUpstreamProviders(
-      all,
-      pooledIds,
-      providerId => runtime?.getProviderAuthStatus(providerId)?.configured === true,
-    ).map(provider => provider.id))
+    // A throwing status probe must not break the whole list — treat as
+    // unconfigured and let the marker signal speak instead.
+    const coreConfigured = (providerId: string): boolean => {
+      try {
+        return runtime?.getProviderAuthStatus(providerId)?.configured === true
+      } catch {
+        return false
+      }
+    }
+    const ids = new Set(pendingUpstreamProviders(all, pooledIds, coreConfigured)
+      .map(provider => provider.id))
     const markers = await store.getUpstreamOnlyMarkers()
     const unpooledMarkers = Object.keys(markers).filter(id => !pooledIds.has(id))
     if (unpooledMarkers.length > 0) {
@@ -1257,7 +1263,9 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                 // Remember this decision in the store: Pi core status cannot
                 // see provider-owned native stores, so without the marker
                 // /accounts and /multilogout would have no trace of it.
-                await store.markUpstreamOnly(provider.id, changedAuthFiles)
+                // Status-flip-only backfills (no file changed) need no
+                // marker: core status already sees those at display time.
+                if (changedAuthFiles.length > 0) await store.markUpstreamOnly(provider.id, changedAuthFiles)
                 await reconcile(ctx)
                 ctx.ui.notify(upstreamOnlyNotice(provider.name, label), 'info')
               } else {

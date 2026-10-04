@@ -460,13 +460,6 @@ export class MultiAuthStore {
     })
   }
 
-  async clearUpstreamOnly(providerId: string): Promise<void> {
-    assertSafeKey(providerId, 'provider id')
-    await this.mutate(state => {
-      if (state.upstreamOnly !== undefined) delete state.upstreamOnly[providerId]
-    })
-  }
-
   async addAccount(providerId: string, input: AddMultiAuthAccount): Promise<MultiAuthAccount> {
     assertSafeKey(providerId, 'provider id')
     const label = input.label.trim()
