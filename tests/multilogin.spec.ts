@@ -32,6 +32,7 @@ import {
   shouldWarnUpstreamDuplicate,
   showLoginDialog,
   snapshotWatchedAuthFiles,
+  upstreamAuthSource,
   upstreamDuplicateNotice,
   upstreamOnlyNotice,
 } from '../src/multilogin.ts'
@@ -265,7 +266,7 @@ describe('upstream duplicate notice', () => {
       modelRegistry: {
         runtime: {
           getProviders: () => [],
-          getProviderAuthStatus: () => ({ configured }),
+          getProviderAuthStatus: () => ({ configured, source: 'stored' }),
           isUsingOAuth: () => true,
         },
       },
@@ -282,6 +283,27 @@ describe('upstream duplicate notice', () => {
     expect(liveUpstreamConfigured({ configured: true, source: 'login' })).toBe(true)
     expect(liveUpstreamConfigured({ configured: true, source: 'environment' })).toBe(true)
     expect(liveUpstreamConfigured(undefined)).toBe(false)
+  })
+
+  it('judges the auth-check wrap by the demoted label, not the generic source', () => {
+    // Pi core getProviderAuthStatus wraps an auth-check result as
+    // {configured: true, source: 'environment', label: check.source} — the
+    // check's own source is demoted into the label. Both of these are the
+    // cursor placeholder surfacing through that wrap.
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment', label: 'fallback' })).toBe(false)
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment', label: 'configured API key' })).toBe(false)
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment', label: MULTIPOOL_AUTH_SOURCE })).toBe(false)
+    // Genuinely live credentials still pass: a real oauth check result, and
+    // the env-var form (label names the env vars, checked earlier in core).
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment', label: 'OAuth' })).toBe(true)
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment', label: 'CURSOR_API_KEY' })).toBe(true)
+  })
+
+  it('resolves the effective auth source from the label when core demotes it', () => {
+    expect(upstreamAuthSource({ source: 'environment', label: 'fallback' })).toBe('fallback')
+    expect(upstreamAuthSource({ source: 'stored' })).toBe('stored')
+    expect(upstreamAuthSource({ source: 'environment' })).toBe('environment')
+    expect(upstreamAuthSource(undefined)).toBeUndefined()
   })
 
   it('does not count the pool serving itself as upstream evidence (circular status)', () => {

@@ -87,12 +87,48 @@ export const MULTIPOOL_AUTH_SOURCE = 'multiprovider account pool'
  * likewise circular: a provider with a pool but no upstream login must not
  * look like it has one just because the pool answers core's status probe.
  */
-export function liveUpstreamConfigured(
-  status?: { configured?: boolean; source?: string },
-): boolean {
-  return status?.configured === true
-    && status.source !== 'fallback'
-    && status.source !== MULTIPOOL_AUTH_SOURCE
+export interface UpstreamAuthStatus {
+  configured?: boolean
+  source?: string
+  label?: string
+}
+
+/**
+ * The source Pi core actually attributes the credential to.
+ *
+ * `getProviderAuthStatus` has two shapes that both carry a real source:
+ * `{source}` directly (stored, fallback, models_json_key, env-var forms), and
+ * the auth-check wrap `{source: "environment", label: <check source>}` — the
+ * check's own source (e.g. 'fallback' for a static placeholder key, or
+ * 'multiprovider account pool' for our own wrapper) is demoted into `label`
+ * while the top-level source stays the generic 'environment'. Filtering on
+ * `source` alone would count the wrapper's answer as live upstream evidence,
+ * so the effective source is preferred whenever core provides it.
+ */
+export function upstreamAuthSource(status?: UpstreamAuthStatus): string | undefined {
+  if (status === undefined) return undefined
+  if (status.source === 'environment' && status.label !== undefined) return status.label
+  return status.source
+}
+
+/**
+ * Static config keys that Pi core counts as configured without any operator
+ * action. 'fallback' is an extension-embedded apiKey (cursor-sdk's
+ * placeholder); 'configured API key' is the same static key surfacing through
+ * the auth-check wrap, where core demotes the check's source into `label`.
+ * Neither is a credential the operator set — no /login, no auth.json, no
+ * environment — so neither counts as live upstream evidence. A genuinely
+ * env-var-configured key never carries these sources: core reports it earlier
+ * with `label` set to the env var names.
+ */
+export const STATIC_AUTH_SOURCES = ['fallback', 'configured API key'] as const
+
+export function liveUpstreamConfigured(status?: UpstreamAuthStatus): boolean {
+  if (status?.configured !== true) return false
+  const source = upstreamAuthSource(status)
+  return source !== undefined
+    && !STATIC_AUTH_SOURCES.includes(source as (typeof STATIC_AUTH_SOURCES)[number])
+    && source !== MULTIPOOL_AUTH_SOURCE
 }
 
 export function isUpstreamConfigured(ctx: ExtensionContext, providerId: string): boolean {
