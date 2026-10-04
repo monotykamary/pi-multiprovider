@@ -20,6 +20,7 @@ import {
   changedWatchedAuthFiles,
   isUpstreamConfigured,
   isWatchedAuthFileName,
+  liveUpstreamConfigured,
   LoginDialogHostComponent,
   loginCredential,
   markerPendingUpstreamIds,
@@ -272,6 +273,13 @@ describe('upstream duplicate notice', () => {
   it('reports upstream as configured only when the runtime says so', () => {
     expect(isUpstreamConfigured(ctxWithUpstream(true), 'antigravity')).toBe(true)
     expect(isUpstreamConfigured(ctxWithUpstream(false), 'antigravity')).toBe(false)
+  })
+
+  it('treats a fallback-embedded key as not configured (placeholder, not a live login)', () => {
+    expect(liveUpstreamConfigured({ configured: true, source: 'fallback' })).toBe(false)
+    expect(liveUpstreamConfigured({ configured: true, source: 'login' })).toBe(true)
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment' })).toBe(true)
+    expect(liveUpstreamConfigured(undefined)).toBe(false)
   })
 
   it('reports unconfigured when there is no session runtime', () => {

@@ -70,9 +70,21 @@ export function probeSessionRuntime(ctx: ExtensionContext): SessionRuntime | und
  * pointing at the same underlying account. The paste-API-key flow never
  * touches upstream, so it is excluded by the caller via `method`.
  */
+/**
+ * A "fallback" source means the key is statically embedded by an extension
+ * (e.g. pi-cursor-sdk's non-functional placeholder), not a live login, so it
+ * must not count as an upstream credential — the upstream row would otherwise
+ * point at a placeholder the user never set.
+ */
+export function liveUpstreamConfigured(
+  status?: { configured?: boolean; source?: string },
+): boolean {
+  return status?.configured === true && status.source !== 'fallback'
+}
+
 export function isUpstreamConfigured(ctx: ExtensionContext, providerId: string): boolean {
   try {
-    return probeSessionRuntime(ctx)?.getProviderAuthStatus(providerId)?.configured === true
+    return liveUpstreamConfigured(probeSessionRuntime(ctx)?.getProviderAuthStatus(providerId))
   } catch {
     return false
   }
