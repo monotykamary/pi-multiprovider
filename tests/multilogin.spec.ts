@@ -1,3 +1,6 @@
+import { mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   createProvider,
   type AuthEvent,
@@ -12,11 +15,15 @@ import {
 import type { TUI } from '@earendil-works/pi-tui'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  changedWatchedAuthFiles,
   isUpstreamConfigured,
+  isWatchedAuthFileName,
   LoginDialogHostComponent,
   loginCredential,
   shouldSaveAsUpstreamOnly,
+  shouldWarnUpstreamDuplicate,
   showLoginDialog,
+  snapshotWatchedAuthFiles,
   upstreamDuplicateNotice,
   upstreamOnlyNotice,
 } from '../src/multilogin.ts'
@@ -290,48 +297,35 @@ describe('upstream duplicate notice', () => {
 })
 
 describe('upstream-first first add', () => {
-  it('saves as upstream only for a new pool whose login backfilled native upstream', () => {
+  it('saves as upstream only for a new pool whose login backfilled native state', () => {
     expect(shouldSaveAsUpstreamOnly({
       poolExistedBefore: false,
-      upstreamBefore: false,
       method: 'oauth',
-      upstreamAfter: true,
+      providerBackfilledNative: true,
     })).toBe(true)
   })
 
   it('pools normally when the pool already existed', () => {
     expect(shouldSaveAsUpstreamOnly({
       poolExistedBefore: true,
-      upstreamBefore: false,
       method: 'oauth',
-      upstreamAfter: true,
+      providerBackfilledNative: true,
     })).toBe(false)
   })
 
-  it('pools normally when upstream was already configured', () => {
+  it('pools normally when the login left native state untouched (pure login)', () => {
     expect(shouldSaveAsUpstreamOnly({
       poolExistedBefore: false,
-      upstreamBefore: true,
       method: 'oauth',
-      upstreamAfter: true,
-    })).toBe(false)
-  })
-
-  it('pools normally when the login left upstream empty (pure login)', () => {
-    expect(shouldSaveAsUpstreamOnly({
-      poolExistedBefore: false,
-      upstreamBefore: false,
-      method: 'oauth',
-      upstreamAfter: false,
+      providerBackfilledNative: false,
     })).toBe(false)
   })
 
   it('pools normally for the paste-API-key flow, which never touches upstream', () => {
     expect(shouldSaveAsUpstreamOnly({
       poolExistedBefore: false,
-      upstreamBefore: false,
       method: 'api_key_paste',
-      upstreamAfter: true,
+      providerBackfilledNative: true,
     })).toBe(false)
   })
 
@@ -340,5 +334,84 @@ describe('upstream-first first add', () => {
     expect(message).toContain('Antigravity')
     expect(message).toContain('upstream')
     expect(message).toContain('/multilogin')
+  })
+})
+
+describe('upstream duplicate warning', () => {
+  it('warns when the login backfilled native state', () => {
+    expect(shouldWarnUpstreamDuplicate({
+      savedAsUpstreamOnly: false,
+      method: 'oauth',
+      providerBackfilledNative: true,
+      upstreamConfiguredAfter: false,
+    })).toBe(true)
+  })
+
+  it('warns when upstream is configured afterwards (standard providers)', () => {
+    expect(shouldWarnUpstreamDuplicate({
+      savedAsUpstreamOnly: false,
+      method: 'oauth',
+      providerBackfilledNative: false,
+      upstreamConfiguredAfter: true,
+    })).toBe(true)
+  })
+
+  it('stays quiet for pure logins with no native trace', () => {
+    expect(shouldWarnUpstreamDuplicate({
+      savedAsUpstreamOnly: false,
+      method: 'oauth',
+      providerBackfilledNative: false,
+      upstreamConfiguredAfter: false,
+    })).toBe(false)
+  })
+
+  it('stays quiet on the upstream-first path and for pasted keys', () => {
+    expect(shouldWarnUpstreamDuplicate({
+      savedAsUpstreamOnly: true,
+      method: 'oauth',
+      providerBackfilledNative: true,
+      upstreamConfiguredAfter: false,
+    })).toBe(false)
+    expect(shouldWarnUpstreamDuplicate({
+      savedAsUpstreamOnly: false,
+      method: 'api_key_paste',
+      providerBackfilledNative: true,
+      upstreamConfiguredAfter: true,
+    })).toBe(false)
+  })
+})
+
+describe('watched auth files', () => {
+  it('matches auth-ish file names and skips the pool store, locks, and temp files', () => {
+    expect(isWatchedAuthFileName('auth.json')).toBe(true)
+    expect(isWatchedAuthFileName('antigravity-accounts.json')).toBe(true)
+    expect(isWatchedAuthFileName('cursor-credentials.json')).toBe(true)
+    expect(isWatchedAuthFileName('models-store.json')).toBe(false)
+    expect(isWatchedAuthFileName('multiprovider-auth.json', ['multiprovider-auth.json'])).toBe(false)
+    expect(isWatchedAuthFileName('auth.json.lock')).toBe(false)
+    expect(isWatchedAuthFileName('.multiprovider-auth.json.123.abc.tmp')).toBe(false)
+  })
+
+  it('detects a native store created or rewritten across snapshots', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'multiprovider-watch-'))
+    try {
+      const before = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
+      expect(changedWatchedAuthFiles(before, before)).toEqual([])
+      await writeFile(join(dir, 'antigravity-accounts.json'), '{"accounts":{}}')
+      await writeFile(join(dir, 'models-store.json'), '{}')
+      const afterCreate = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
+      expect(changedWatchedAuthFiles(before, afterCreate)).toEqual(['antigravity-accounts.json'])
+      const past = new Date(Date.now() - 60_000)
+      await utimes(join(dir, 'antigravity-accounts.json'), past, past)
+      const afterRewrite = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
+      expect(changedWatchedAuthFiles(afterCreate, afterRewrite)).toEqual(['antigravity-accounts.json'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('returns an empty snapshot for a missing directory', async () => {
+    const snapshot = await snapshotWatchedAuthFiles(join(tmpdir(), 'multiprovider-watch-missing-dir'))
+    expect(snapshot).toEqual({})
   })
 })

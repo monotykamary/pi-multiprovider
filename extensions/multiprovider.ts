@@ -1,5 +1,6 @@
 import type { Api, AuthType, Credential, Model, Provider } from '@earendil-works/pi-ai'
 import { normalizeContext } from '@earendil-works/pi-ai'
+import { dirname } from 'node:path'
 import {
   DynamicBorder,
   type ExtensionAPI,
@@ -24,6 +25,7 @@ import {
   getMultiAuthPath,
   type FailoverInfo,
   liftProvider,
+  MULTIPROVIDER_AUTH_FILE,
   MULTIPROVIDER_REGISTER_EVENT,
   MULTIPROVIDER_SERVICE_EVENT,
   MultiAuthStore,
@@ -49,7 +51,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { isUpstreamConfigured, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, showLoginDialog, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
+import { changedWatchedAuthFiles, isUpstreamConfigured, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -1149,18 +1151,32 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           if (account === undefined) {
             ctx.ui.notify('That account is no longer stored.', 'warning')
           } else {
+            const reauthWatchBefore = result.method === 'api_key_paste'
+              ? undefined
+              : await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE])
             const login = await runLogin(result.method, `Reauthenticate ${account.label}`)
             if (login !== undefined && 'error' in login) {
               ctx.ui.notify(`Failed to reauthenticate ${account.label}: ${login.error.message}`, 'error')
             } else if (login !== undefined) {
               let credential: Credential | undefined = login.credential
+              const reauthBackfilledNative = reauthWatchBefore === undefined
+                ? false
+                : changedWatchedAuthFiles(
+                    reauthWatchBefore,
+                    await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE]),
+                  ).length > 0
               try {
                 await store.replaceAccountCredential(provider.id, account.id, credential)
                 credential = undefined
                 if (service.hasProvider(provider.id)) service.resetHealth(provider.id, account.id)
                 await reconcile(ctx)
                 ctx.ui.notify(
-                  `Reauthenticated ${account.label} for ${provider.name}. Credentials saved to ${getMultiAuthPath()}${result.method !== 'api_key_paste' && isUpstreamConfigured(ctx, provider.id) ? ' This login may also have updated the native Pi credential, in which case the pool\'s upstream row and the pooled account are the same account counted twice — disable upstream in /multilogin if so.' : ''}`,
+                  `Reauthenticated ${account.label} for ${provider.name}. Credentials saved to ${getMultiAuthPath()}${shouldWarnUpstreamDuplicate({
+                    savedAsUpstreamOnly: false,
+                    method: result.method,
+                    providerBackfilledNative: reauthBackfilledNative,
+                    upstreamConfiguredAfter: isUpstreamConfigured(ctx, provider.id),
+                  }) ? ' This login may also have updated the native Pi credential, in which case the pool\'s upstream row and the pooled account are the same account counted twice — disable upstream in /multilogin if so.' : ''}`,
                   'info',
                 )
               } catch (error) {
@@ -1174,6 +1190,12 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           const existing = await store.getPool(provider.id)
           const poolExistedBefore = existing !== undefined
           const upstreamBefore = isUpstreamConfigured(ctx, provider.id)
+          // Pi core status cannot see provider-owned native stores (verified:
+          // an Antigravity login rewrote antigravity-accounts.json while
+          // status still reported unconfigured), so also watch the agent
+          // dir for native-store writes across the login.
+          const agentDir = dirname(getMultiAuthPath())
+          const authFilesBefore = await snapshotWatchedAuthFiles(agentDir, [MULTIPROVIDER_AUTH_FILE])
           const defaultLabel = `${provider.name} ${(existing?.accounts.length ?? 0) + 1}`
           const labelInput = await ctx.ui.input('Account label:', defaultLabel)
           if (labelInput !== undefined) {
@@ -1183,12 +1205,16 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               ctx.ui.notify(`Failed to authenticate ${provider.name}: ${login.error.message}`, 'error')
             } else if (login !== undefined) {
               let credential: Credential | undefined = login.credential
-              if (shouldSaveAsUpstreamOnly({
+              const upstreamAfter = isUpstreamConfigured(ctx, provider.id)
+              const authFilesAfter = await snapshotWatchedAuthFiles(agentDir, [MULTIPROVIDER_AUTH_FILE])
+              const providerBackfilledNative = changedWatchedAuthFiles(authFilesBefore, authFilesAfter).length > 0
+                || (!upstreamBefore && upstreamAfter)
+              const saveAsUpstreamOnly = shouldSaveAsUpstreamOnly({
                 poolExistedBefore,
-                upstreamBefore,
                 method,
-                upstreamAfter: isUpstreamConfigured(ctx, provider.id),
-              })) {
+                providerBackfilledNative,
+              })
+              if (saveAsUpstreamOnly) {
                 credential = undefined
                 await reconcile(ctx)
                 ctx.ui.notify(upstreamOnlyNotice(provider.name), 'info')
@@ -1211,7 +1237,12 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                   credential = undefined
                   await reconcile(ctx)
                   ctx.ui.notify(
-                    method !== 'api_key_paste' && isUpstreamConfigured(ctx, provider.id)
+                    shouldWarnUpstreamDuplicate({
+                      savedAsUpstreamOnly: false,
+                      method,
+                      providerBackfilledNative,
+                      upstreamConfiguredAfter: upstreamAfter,
+                    })
                       ? upstreamDuplicateNotice(provider.name, label)
                       : `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
                     'info',
