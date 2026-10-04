@@ -1374,11 +1374,14 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         // why the operator came here — point at its real owner instead of
         // reading as "the account vanished".
         const pending = await pendingUpstream(ctx, new Set())
+        // warning, not info: Pi renders info notifies as a dim status line
+        // that later notifies overwrite in place — the user reads that as
+        // the command doing nothing. A warning appends a visible chat line.
         ctx.ui.notify(
           pending.length === 0
             ? 'No multilogin accounts are stored.'
             : `No multilogin accounts are stored. Native upstream credentials (${pending.map(provider => provider.label).join(', ')}) are separate — manage them via /login or the provider's own accounts command.`,
-          'info',
+          'warning',
         )
         return
       }
@@ -1425,7 +1428,9 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       const pooledIds = new Set(snapshot.providers.map(provider => provider.id))
       const pending = await pendingUpstream(ctx, pooledIds)
       if (snapshot.providers.length === 0 && pending.length === 0) {
-        ctx.ui.notify('No account pools are configured. Use /multilogin to add one.', 'info')
+        // warning, not info: info notifies render as a dim status line that
+        // later notifies overwrite in place — see /multilogout above.
+        ctx.ui.notify('No account pools are configured. Use /multilogin to add one.', 'warning')
         return
       }
       await ctx.ui.select('Provider Accounts', [

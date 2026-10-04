@@ -38,14 +38,45 @@ function mockCtx(calls: string[]) {
   }
 }
 
-describe('multilogout handler repro', () => {
-  it('notifies when nothing is stored', async () => {
+describe('multilogout handler', () => {
+  it('shows a visible warning when nothing is stored', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'multilogout-repro-'))
     try {
       const handler = await loadMultilogoutHandler(dir)
       const calls: string[] = []
       await handler('', mockCtx(calls))
-      expect(calls).not.toEqual([])
+      // warning, not info: Pi renders info notifies as a dim status line
+      // that later notifies overwrite in place — the user reads that as
+      // the command doing nothing. Pin the level so it stays visible.
+      expect(calls).toEqual([
+        'notify:warning:No multilogin accounts are stored.',
+      ])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('shows a visible warning with the pending upstream pointer', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'multilogout-repro-'))
+    try {
+      await writeFile(join(dir, 'multiprovider-auth.json'), JSON.stringify({
+        version: 1,
+        providers: {},
+        upstreamOnly: {
+          antigravity: {
+            addedAt: '2026-10-04T05:17:38.681Z',
+            watchedFiles: ['antigravity-accounts.json'],
+          },
+        },
+      }))
+      await writeFile(join(dir, 'antigravity-accounts.json'), '{"accounts":{}}')
+      const handler = await loadMultilogoutHandler(dir)
+      const calls: string[] = []
+      await handler('', mockCtx(calls))
+      // Label falls back to the raw id when the registry has no display name.
+      expect(calls).toEqual([
+        expect.stringMatching(/^notify:warning:No multilogin accounts are stored\. Native upstream credentials \([Aa]ntigravity\)/),
+      ])
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
