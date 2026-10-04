@@ -1,5 +1,6 @@
 import type { Api, AuthType, Credential, Model, Provider } from '@earendil-works/pi-ai'
-import { isRetryableAssistantError, normalizeContext } from '@earendil-works/pi-ai'
+import { normalizeContext } from '@earendil-works/pi-ai'
+import { dirname } from 'node:path'
 import {
   DynamicBorder,
   type ExtensionAPI,
@@ -24,6 +25,7 @@ import {
   getMultiAuthPath,
   type FailoverInfo,
   liftProvider,
+  MULTIPROVIDER_AUTH_FILE,
   MULTIPROVIDER_REGISTER_EVENT,
   MULTIPROVIDER_SERVICE_EVENT,
   MultiAuthStore,
@@ -49,7 +51,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { isUpstreamConfigured, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, showLoginDialog, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
+import { changedWatchedAuthFiles, isUpstreamConfigured, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -511,11 +513,8 @@ function statusLines(
       const cooldown = account.cooldownUntil === undefined
         ? ''
         : ` · cooldown until ${new Date(account.cooldownUntil).toLocaleTimeString()}`
-      const modelCooldowns = Object.entries(account.modelCooldowns ?? {})
-        .map(([modelId, until]) => ` · ${modelId} cooldown until ${new Date(until).toLocaleTimeString()}`)
-        .join('')
       lines.push(
-        `  ${account.label} (${account.authKind}) · ${account.status} · w${account.weight} · p${account.priority} · ${account.inFlight} in flight · ${account.consecutiveFailures} failures${cooldown}${modelCooldowns}`,
+        `  ${account.label} (${account.authKind}) · ${account.status} · w${account.weight} · p${account.priority} · ${account.inFlight} in flight · ${account.consecutiveFailures} failures${cooldown}`,
       )
     }
   }
@@ -566,54 +565,6 @@ function uniqueProviders(
   return providers.sort((left, right) => left.name.localeCompare(right.name))
 }
 
-// Pi rebuilds a provider that has models.json or extension overlays into a new
-// object on every registration, and that object keeps only `headers` from the
-// registered provider by reference. Each lift therefore gets its own headers
-// object, so the registry's copy of a lift is still recognized as that lift.
-const isLiftOf = (current: Provider<Api> | undefined, lift: Provider<Api> | undefined): boolean =>
-  current !== undefined && lift !== undefined
-  && (current === lift || (lift.headers !== undefined && current.headers === lift.headers))
-
-// Pi loads one instance of this extension per session, and subagent sessions
-// share the parent's provider registry. Each instance lifts the real base
-// provider, never another instance's lift, so shutting one instance down cannot
-// break a chain of wrappers. This process-wide list of live registrations (lifts
-// and virtual providers) decides what a departing instance hands the registry
-// back to, in whatever order sessions end.
-const LIFTED_BASE = Symbol.for('pi-multiprovider.lifted-base')
-type LiftedProvider = Provider<Api> & { [LIFTED_BASE]: Provider<Api> }
-const liveProviders: Map<string, Provider<Api>[]> = ((globalThis as unknown as Record<symbol, Map<string, Provider<Api>[]> | undefined>)[
-  Symbol.for('pi-multiprovider.live-providers')
-] ??= new Map())
-
-// The registry's copy of another instance's lift may be Pi's composed wrapper,
-// which carries no tag of its own; match it against the live lifts instead.
-const realBase = (providerId: string, provider: Provider<Api> | undefined): Provider<Api> | undefined => {
-  let base = provider
-  while (base !== undefined) {
-    const candidate: Provider<Api> = base
-    const lift = LIFTED_BASE in candidate
-      ? candidate
-      : liveProviders.get(providerId)?.find(live => LIFTED_BASE in live && isLiftOf(candidate, live))
-    if (lift === undefined) break
-    base = (lift as LiftedProvider)[LIFTED_BASE]
-  }
-  return base
-}
-
-/** Swaps `previous` for `next` among the live registrations and returns the newest one left. */
-const replaceLiveProvider = (
-  providerId: string,
-  previous: Provider<Api> | undefined,
-  next?: Provider<Api>,
-): Provider<Api> | undefined => {
-  const live = (liveProviders.get(providerId) ?? []).filter(provider => provider !== previous)
-  if (next !== undefined) live.push(next)
-  if (live.length === 0) liveProviders.delete(providerId)
-  else liveProviders.set(providerId, live)
-  return live.at(-1)
-}
-
 export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   const service = new MultiProviderService()
   const store = new MultiAuthStore()
@@ -630,18 +581,6 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   const virtualProviders = new Map<string, Provider<Api>>()
   const virtualIntegrations = new Map<string, ProviderRegistration<VirtualBackendRef>>()
   let currentContext: ExtensionContext | undefined
-  // Provider callbacks run on every request and can outlive the context that
-  // registered them: a Pi subagent loads this extension into a child session
-  // that shares the parent's provider registry, and pi marks that session's
-  // context stale once it is disposed. Keep plain values for those callbacks;
-  // dereferencing a stale context throws and fails every later request.
-  let currentSessionId: string | undefined
-  let currentModelRegistry: ExtensionContext['modelRegistry'] | undefined
-  const trackContext = (ctx: ExtensionContext): void => {
-    currentContext = ctx
-    currentSessionId = ctx.sessionManager.getSessionId()
-    currentModelRegistry = ctx.modelRegistry
-  }
   let pendingSessionPins: SessionPin[] = []
   let pendingInheritedSessionPins: InheritedSessionPin[] = []
 
@@ -752,10 +691,6 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const integration = effectiveIntegration(info.providerId)
     const handled = integration?.onFailover?.(info) === true
     if (!isFabricCompactionAvailable()) return handled
-    // Compaction surfaces the failure and relies on Pi to restart the turn.
-    // Quota/auth failures are not host-retryable, so keep rotating inline.
-    if (info.failure.assistantMessage === undefined
-      || !isRetryableAssistantError(info.failure.assistantMessage)) return handled
     void runFailoverCompaction(info)
     return true
   }
@@ -764,8 +699,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const base = baseProviders.get(providerId)
     const installed = installedProviders.get(providerId)
     const current = ctx?.modelRegistry.getProvider(providerId)
-    const newestLiveLift = replaceLiveProvider(providerId, installed)
-    if (base !== undefined && (ctx === undefined || isLiftOf(current, installed))) pi.registerProvider(newestLiveLift ?? base)
+    if (base !== undefined && (ctx === undefined || current === installed)) pi.registerProvider(base)
     installedProviders.delete(providerId)
     baseProviders.delete(providerId)
     registeredIntegrations.delete(providerId)
@@ -782,7 +716,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
 
     const current = ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
     const priorLift = installedProviders.get(providerId)
-    const base = realBase(providerId, isLiftOf(current, priorLift) ? baseProviders.get(providerId) : current)
+    const base = current === priorLift ? baseProviders.get(providerId) : current
     if (base === undefined) {
       if (!warnedMissing.has(providerId)) {
         warnedMissing.add(providerId)
@@ -813,20 +747,14 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       })
     }
 
-    if (isLiftOf(current, priorLift) && baseProviders.get(providerId) === base) return
-    const sessionId = ctx.sessionManager.getSessionId()
-    const affinityKey = integration.affinityKey ?? (() => sessionId)
-    const lifted: Provider<Api> = {
-      ...liftProvider(base, service, {
-        ...integration,
-        affinityKey,
-        onFailover: handleFailover,
-      }),
-      // A headers object of its own lets isLiftOf() see through Pi's composition.
-      headers: { ...base.headers },
-    }
-    Object.defineProperty(lifted, LIFTED_BASE, { value: base })
-    replaceLiveProvider(providerId, priorLift, lifted)
+    if (current === priorLift && baseProviders.get(providerId) === base) return
+    const affinityKey = integration.affinityKey
+      ?? (() => ctx.sessionManager.getSessionId())
+    const lifted = liftProvider(base, service, {
+      ...integration,
+      affinityKey,
+      onFailover: handleFailover,
+    })
     pi.registerProvider(lifted)
     baseProviders.set(providerId, base)
     installedProviders.set(providerId, lifted)
@@ -844,7 +772,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     for (const providerId of storedIds) {
       const current = ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
       const priorLift = installedProviders.get(providerId)
-      const base = realBase(providerId, isLiftOf(current, priorLift) ? baseProviders.get(providerId) : current)
+      const base = current === priorLift ? baseProviders.get(providerId) : current
       if (base === undefined) continue
       if (managedBases.get(providerId) !== base) {
         managedBases.set(providerId, base)
@@ -877,8 +805,6 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       if (prior !== undefined) unregisterVirtualModels(prior)
       virtualConfigs.delete(providerId)
       if (virtualProviders.has(providerId)) {
-        // Deleted from the shared store: every session's registration is obsolete.
-        liveProviders.delete(providerId)
         pi.unregisterProvider(providerId)
         virtualProviders.delete(providerId)
       }
@@ -891,7 +817,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const resolveTemplate = (providerId: string, modelId: string): VirtualModelTemplate | undefined => {
       const provider = installedProviders.get(providerId)
         ?? baseProviders.get(providerId)
-        ?? currentModelRegistry?.getProvider(providerId) as Provider<Api> | undefined
+        ?? currentContext?.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
       const model = provider?.getModels().find(item => item.id === modelId)
       return model === undefined ? undefined : captureVirtualModelTemplate(model)
     }
@@ -910,10 +836,11 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       if (prior !== undefined) unregisterVirtualModels(prior)
 
       // Registration runs at extension load, before any session exists; the
-      // closures only read the session snapshot once a session is streaming.
+      // closures only dereference the context once a session is streaming.
+      const sessionContext = (): ExtensionContext | undefined => currentContext
       const providerLabel = (providerId: string): string | undefined =>
         baseProviders.get(providerId)?.name
-        ?? currentModelRegistry?.getProvider(providerId)?.name
+        ?? sessionContext()?.modelRegistry.getProvider(providerId)?.name
 
       const integrations = createVirtualIntegrations(config, { getProviderLabel: providerLabel })
       for (const integration of integrations) {
@@ -926,17 +853,17 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         service,
         config,
         onFailover: handleFailover,
-        getAffinityKey: () => currentSessionId ?? '',
+        getAffinityKey: () => sessionContext()?.sessionManager.getSessionId() ?? '',
         getBackingProvider: providerId =>
           installedProviders.get(providerId)
           ?? baseProviders.get(providerId)
-          ?? currentModelRegistry?.getProvider(providerId) as Provider<Api> | undefined,
+          ?? sessionContext()?.modelRegistry.getProvider(providerId) as Provider<Api> | undefined,
         isBackendConfigured: providerId =>
-          currentModelRegistry?.getProviderAuthStatus(providerId).configured ?? true,
+          sessionContext()?.modelRegistry.getProviderAuthStatus(providerId).configured ?? true,
         resolveAmbientAuth: async (_providerId, model, signal) => {
-          const registry = currentModelRegistry
-          if (registry === undefined) return { ok: false, error: 'multiprovider: session not ready' }
-          const resolution = await registry.getApiKeyAndHeaders(model)
+          const context = sessionContext()
+          if (context === undefined) return { ok: false, error: 'multiprovider: session not ready' }
+          const resolution = await context.modelRegistry.getApiKeyAndHeaders(model)
           if (!resolution.ok) return { ok: false, error: resolution.error }
           return {
             ok: true,
@@ -947,7 +874,6 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           }
         },
       })
-      replaceLiveProvider(config.id, virtualProviders.get(config.id), virtualProvider)
       pi.registerProvider(virtualProvider)
       virtualProviders.set(config.id, virtualProvider)
       virtualConfigs.set(config.id, config)
@@ -1070,7 +996,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   })
 
   pi.on('session_start', async (_event, ctx) => {
-    trackContext(ctx)
+    currentContext = ctx
     pendingSessionPins = sessionPinsFromEntries(ctx.sessionManager.getEntries())
     const recordedPools = new Set(pendingSessionPins.map(pin => pin.pool))
     pendingInheritedSessionPins = inheritedSessionPinsFromEnv(process.env)
@@ -1080,7 +1006,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
   })
 
   pi.on('before_agent_start', async (_event, ctx) => {
-    trackContext(ctx)
+    currentContext = ctx
     await reconcile(ctx)
   })
 
@@ -1089,13 +1015,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     for (const providerId of installedProviders.keys()) restoreProvider(providerId, currentContext)
     managedIntegrations.clear()
     managedBases.clear()
-    for (const [providerId, provider] of virtualProviders) {
-      const newest = replaceLiveProvider(providerId, provider)
-      // Another live session registered this id after us; leave its registration.
-      if (currentModelRegistry !== undefined && currentModelRegistry.getProvider(providerId) !== provider) continue
-      if (newest === undefined) pi.unregisterProvider(providerId)
-      else pi.registerProvider(newest)
-    }
+    for (const providerId of virtualProviders.keys()) pi.unregisterProvider(providerId)
     virtualProviders.clear()
     virtualIntegrations.clear()
     virtualConfigs.clear()
@@ -1231,18 +1151,32 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           if (account === undefined) {
             ctx.ui.notify('That account is no longer stored.', 'warning')
           } else {
+            const reauthWatchBefore = result.method === 'api_key_paste'
+              ? undefined
+              : await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE])
             const login = await runLogin(result.method, `Reauthenticate ${account.label}`)
             if (login !== undefined && 'error' in login) {
               ctx.ui.notify(`Failed to reauthenticate ${account.label}: ${login.error.message}`, 'error')
             } else if (login !== undefined) {
               let credential: Credential | undefined = login.credential
+              const reauthBackfilledNative = reauthWatchBefore === undefined
+                ? false
+                : changedWatchedAuthFiles(
+                    reauthWatchBefore,
+                    await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE]),
+                  ).length > 0
               try {
                 await store.replaceAccountCredential(provider.id, account.id, credential)
                 credential = undefined
                 if (service.hasProvider(provider.id)) service.resetHealth(provider.id, account.id)
                 await reconcile(ctx)
                 ctx.ui.notify(
-                  `Reauthenticated ${account.label} for ${provider.name}. Credentials saved to ${getMultiAuthPath()}${result.method !== 'api_key_paste' && isUpstreamConfigured(ctx, provider.id) ? ' This login may also have updated the native Pi credential, in which case the pool\'s upstream row and the pooled account are the same account counted twice — disable upstream in /multilogin if so.' : ''}`,
+                  `Reauthenticated ${account.label} for ${provider.name}. Credentials saved to ${getMultiAuthPath()}${shouldWarnUpstreamDuplicate({
+                    savedAsUpstreamOnly: false,
+                    method: result.method,
+                    providerBackfilledNative: reauthBackfilledNative,
+                    upstreamConfiguredAfter: isUpstreamConfigured(ctx, provider.id),
+                  }) ? ' This login may also have updated the native Pi credential, in which case the pool\'s upstream row and the pooled account are the same account counted twice — disable upstream in /multilogin if so.' : ''}`,
                   'info',
                 )
               } catch (error) {
@@ -1256,6 +1190,12 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           const existing = await store.getPool(provider.id)
           const poolExistedBefore = existing !== undefined
           const upstreamBefore = isUpstreamConfigured(ctx, provider.id)
+          // Pi core status cannot see provider-owned native stores (verified:
+          // an Antigravity login rewrote antigravity-accounts.json while
+          // status still reported unconfigured), so also watch the agent
+          // dir for native-store writes across the login.
+          const agentDir = dirname(getMultiAuthPath())
+          const authFilesBefore = await snapshotWatchedAuthFiles(agentDir, [MULTIPROVIDER_AUTH_FILE])
           const defaultLabel = `${provider.name} ${(existing?.accounts.length ?? 0) + 1}`
           const labelInput = await ctx.ui.input('Account label:', defaultLabel)
           if (labelInput !== undefined) {
@@ -1265,12 +1205,16 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               ctx.ui.notify(`Failed to authenticate ${provider.name}: ${login.error.message}`, 'error')
             } else if (login !== undefined) {
               let credential: Credential | undefined = login.credential
-              if (shouldSaveAsUpstreamOnly({
+              const upstreamAfter = isUpstreamConfigured(ctx, provider.id)
+              const authFilesAfter = await snapshotWatchedAuthFiles(agentDir, [MULTIPROVIDER_AUTH_FILE])
+              const providerBackfilledNative = changedWatchedAuthFiles(authFilesBefore, authFilesAfter).length > 0
+                || (!upstreamBefore && upstreamAfter)
+              const saveAsUpstreamOnly = shouldSaveAsUpstreamOnly({
                 poolExistedBefore,
-                upstreamBefore,
                 method,
-                upstreamAfter: isUpstreamConfigured(ctx, provider.id),
-              })) {
+                providerBackfilledNative,
+              })
+              if (saveAsUpstreamOnly) {
                 credential = undefined
                 await reconcile(ctx)
                 ctx.ui.notify(upstreamOnlyNotice(provider.name), 'info')
@@ -1293,7 +1237,12 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                   credential = undefined
                   await reconcile(ctx)
                   ctx.ui.notify(
-                    method !== 'api_key_paste' && isUpstreamConfigured(ctx, provider.id)
+                    shouldWarnUpstreamDuplicate({
+                      savedAsUpstreamOnly: false,
+                      method,
+                      providerBackfilledNative,
+                      upstreamConfiguredAfter: upstreamAfter,
+                    })
                       ? upstreamDuplicateNotice(provider.name, label)
                       : `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
                     'info',

@@ -1,3 +1,5 @@
+import { readdir, stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import type {
   Api,
   AuthEvent,
@@ -87,26 +89,117 @@ export function upstreamDuplicateNotice(providerName: string, accountLabel: stri
 
 export interface UpstreamFirstAddSnapshot {
   poolExistedBefore: boolean
-  upstreamBefore: boolean
   method: string
-  upstreamAfter: boolean
+  /**
+   * True when the login observably backfilled a native credential: either a
+   * watched auth file in the agent dir was created/modified across the login,
+   * or Pi core status flipped from unconfigured to configured. The file
+   * signal is the one that matters for providers with their own native
+   * stores (e.g. Antigravity): Pi core's getProviderAuthStatus only consults
+   * the core credential, the models.json/provider config, and its auth
+   * snapshot, so it stays false even right after such a provider persists
+   * natively — verified live when a re-add rewrote antigravity-accounts.json
+   * yet status still reported unconfigured.
+   */
+  providerBackfilledNative: boolean
 }
 
 /**
  * Decides whether a fresh add through a provider login dialog should become
  * the native upstream credential instead of a pooled copy. True only when the
- * pool is new, upstream was empty before the login, and the login backfilled
- * it — i.e. the provider persists to its own native store as a side effect
- * (Antigravity's loginAndRemember). Pure logins leave upstream empty, and the
- * paste-API-key flow never touches it, so both fall through to the pool path.
- * Observing the flip keeps multiprovider read-only: it never writes native
- * credentials itself, it just refrains from duplicating them.
+ * pool is new and the login observably backfilled native state — i.e. the
+ * provider persists to its own native store as a side effect (Antigravity's
+ * loginAndRemember). Pure logins change nothing natively, and the
+ * paste-API-key flow never touches upstream, so both fall through to the
+ * pool path. Detection is observational, so multiprovider stays read-only: it
+ * never writes native credentials itself, it just refrains from duplicating
+ * them.
  */
 export function shouldSaveAsUpstreamOnly(snapshot: UpstreamFirstAddSnapshot): boolean {
   return !snapshot.poolExistedBefore
-    && !snapshot.upstreamBefore
     && snapshot.method !== 'api_key_paste'
-    && snapshot.upstreamAfter
+    && snapshot.providerBackfilledNative
+}
+
+export interface UpstreamDuplicateWarningSnapshot {
+  savedAsUpstreamOnly: boolean
+  method: string
+  providerBackfilledNative: boolean
+  upstreamConfiguredAfter: boolean
+}
+
+/**
+ * Whether the post-add notice should warn that the new pooled copy may
+ * duplicate the native upstream credential. Either a natively-persisting
+ * login was observed mid-add, or Pi core reports upstream configured
+ * afterwards (covers standard providers whose native credential predates the
+ * pool). The upstream-first path and the paste flow never warn.
+ */
+export function shouldWarnUpstreamDuplicate(snapshot: UpstreamDuplicateWarningSnapshot): boolean {
+  return !snapshot.savedAsUpstreamOnly
+    && snapshot.method !== 'api_key_paste'
+    && (snapshot.providerBackfilledNative || snapshot.upstreamConfiguredAfter)
+}
+
+/** File names this detector never treats as a native-credential side effect. */
+const AUTH_WATCH_SKIP_SUFFIXES = ['.lock', '.tmp']
+
+/**
+ * Metadata snapshot of the agent dir's auth-ish files (names plus mtime and
+ * size only — contents are never read). Compared across a provider login to
+ * detect a native-store side effect the Pi core status cannot see.
+ *
+ * `exclude` names multiprovider's own store, which the caller has not yet
+ * written at snapshot time but must never count. Concurrent unrelated
+ * rewrites inside the login window (e.g. another account's token refresh)
+ * can false-positive; the consequence is bounded (upstream-first keeps one
+ * serving row, and the notice names what happened), and the next add takes
+ * the normal pool path.
+ */
+export type WatchedAuthFiles = Record<string, { mtimeMs: number; size: number }>
+
+export function isWatchedAuthFileName(name: string, exclude: readonly string[] = []): boolean {
+  if (exclude.includes(name)) return false
+  if (AUTH_WATCH_SKIP_SUFFIXES.some(suffix => name.endsWith(suffix))) return false
+  return /(auth|account|credential|login)/i.test(name)
+}
+
+export async function snapshotWatchedAuthFiles(
+  dir: string,
+  exclude: readonly string[] = [],
+): Promise<WatchedAuthFiles> {
+  const snapshot: WatchedAuthFiles = {}
+  let entries: string[]
+  try {
+    entries = await readdir(dir)
+  } catch {
+    return snapshot
+  }
+  for (const name of entries) {
+    if (!isWatchedAuthFileName(name, exclude)) continue
+    try {
+      const info = await stat(join(dir, name))
+      if (!info.isFile()) continue
+      snapshot[name] = { mtimeMs: info.mtimeMs, size: info.size }
+    } catch {
+      continue
+    }
+  }
+  return snapshot
+}
+
+/** Names created or metadata-changed between two snapshots. */
+export function changedWatchedAuthFiles(before: WatchedAuthFiles, after: WatchedAuthFiles): string[] {
+  const changed: string[] = []
+  for (const [name, state] of Object.entries(after)) {
+    const previous = before[name]
+    if (previous === undefined) {
+      changed.push(name)
+    } else if (previous.mtimeMs !== state.mtimeMs || previous.size !== state.size) {
+      changed.push(name)
+    }
+  }
+  return changed
 }
 
 /**
