@@ -1354,6 +1354,18 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         ctx.ui.notify('/multilogout requires Pi interactive mode.', 'warning')
         return
       }
+      // A UI command must never die silently: surface failures as an error
+      // notice so a backend problem (store lock, unreadable state) is
+      // diagnosable instead of looking like an empty command.
+      try {
+        await multilogout(ctx, args)
+      } catch (error) {
+        ctx.ui.notify(`/multilogout failed: ${errorText(error)}`, 'error')
+      }
+    },
+  })
+
+  const multilogout = async (ctx: ExtensionContext, args: string): Promise<void> => {
       const pools = (await Promise.all(
         (await store.listProviderIds()).map(providerId => store.getPool(providerId)),
       )).filter(pool => pool !== undefined)
@@ -1399,8 +1411,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       await store.removeAccount(pool.providerId, account.id)
       await reconcile(ctx)
       ctx.ui.notify(`Removed ${account.label} from ${pool.providerId}.`, 'info')
-    },
-  })
+  }
 
   pi.registerCommand('accounts', {
     description: 'Show multiprovider account pools and health',
