@@ -1035,6 +1035,20 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     ctx: ExtensionContext,
     pooledIds: ReadonlySet<string>,
   ): Promise<{ id: string; label: string }[]> => {
+    // Display hint only: every failure mode returns no pending rows rather
+    // than breaking the calling command (this lookup runs in branches that
+    // previously could not fail, e.g. /multilogout with nothing stored).
+    try {
+      return await pendingUpstreamInner(ctx, pooledIds)
+    } catch {
+      return []
+    }
+  }
+
+  const pendingUpstreamInner = async (
+    ctx: ExtensionContext,
+    pooledIds: ReadonlySet<string>,
+  ): Promise<{ id: string; label: string }[]> => {
     const runtime = probeSessionRuntime(ctx)
     const all = uniqueProviders(ctx, baseProviders).map(provider => ({ id: provider.id, label: provider.name }))
     // A throwing status probe must not break the whole list — treat as
