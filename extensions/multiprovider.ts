@@ -51,7 +51,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { attributeChangedFilesToSecrets, attributableSecrets, changedWatchedAuthFiles, isUpstreamConfigured, markerPendingUpstreamIds, pendingUpstreamProviders, pendingUpstreamStatusLines, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
+import { attributeChangedFilesToSecrets, attributableSecrets, changedWatchedAuthFiles, isUpstreamConfigured, liveUpstreamConfigured, markerPendingUpstreamIds, pendingUpstreamProviders, pendingUpstreamStatusLines, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -1055,7 +1055,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     // unconfigured and let the marker signal speak instead.
     const coreConfigured = (providerId: string): boolean => {
       try {
-        return runtime?.getProviderAuthStatus(providerId)?.configured === true
+        return liveUpstreamConfigured(runtime?.getProviderAuthStatus(providerId))
       } catch {
         return false
       }
@@ -1110,13 +1110,15 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           const scheduler = await store.getSchedulerSettings()
           const runtime = probeSessionRuntime(ctx)
           const upstreamStatus = runtime?.getProviderAuthStatus(provider.id)
-          const statusConfigured = upstreamStatus !== undefined && upstreamStatus.configured
+          const statusConfigured = liveUpstreamConfigured(upstreamStatus)
           const pendingIds = new Set((await pendingUpstream(
             ctx,
             pool === undefined ? new Set() : new Set([provider.id]),
           )).map(entry => entry.id))
           const upstreamConfigured = statusConfigured || pendingIds.has(provider.id)
-          const upstreamSource = statusConfigured ? (upstreamStatus.label ?? upstreamStatus.source) : undefined
+          const upstreamSource = statusConfigured && upstreamStatus !== undefined
+            ? (upstreamStatus.label ?? upstreamStatus.source)
+            : undefined
           const upstreamState = {
             ...(upstreamConfigured ? { upstreamConfigured } : {}),
             ...(upstreamSource === undefined ? {} : { upstreamSource }),
