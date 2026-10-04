@@ -325,8 +325,13 @@ function storedAccountRow(
 
 function accountsSummary(state: PoolManagerState): string {
   const parts: string[] = []
-  if (state.poolExists) parts.push(state.includeUpstream ? '1 upstream' : '1 upstream (disabled)')
-  else if (state.upstreamConfigured === true) parts.push('1 upstream (pending)')
+  // Only count the upstream slot when an upstream credential exists; a pool
+  // created without one (upstreamConfigured false) runs stored accounts only.
+  if (state.poolExists && state.upstreamConfigured === true) {
+    parts.push(state.includeUpstream ? '1 upstream' : '1 upstream (disabled)')
+  } else if (!state.poolExists && state.upstreamConfigured === true) {
+    parts.push('1 upstream (pending)')
+  }
   const stored = state.accounts.length
   if (stored > 0) {
     const disabled = state.accounts.filter(account => !account.enabled).length
@@ -343,7 +348,12 @@ function accountsSection(
   persist: (id: string, value: string) => void,
 ): SettingItem {
   const rows: SettingItem[] = []
-  if (state.poolExists || state.upstreamConfigured === true) rows.push(upstreamRow(theme, state, persist))
+  // The upstream row only appears when an upstream credential was observed
+  // to exist: Pi core status, a pending-upstream signal, or the pool's
+  // recorded upstreamConfigured. A pool alone is not evidence — a provider
+  // with only a fallback-embedded placeholder key (e.g. cursor) would
+  // otherwise show an upstream row pointing at a credential nobody set.
+  if (state.upstreamConfigured === true) rows.push(upstreamRow(theme, state, persist))
   for (const account of state.accounts) rows.push(storedAccountRow(theme, account, methods, persist))
   if (rows.length === 0) {
     rows.push(setting('accounts.none', 'No accounts yet', '', {

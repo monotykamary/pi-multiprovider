@@ -110,9 +110,10 @@ export interface UpstreamFirstAddSnapshot {
    * add. Upstream-first only applies to the add that CREATES the upstream
    * credential; once it exists, further adds must take the pool path —
    * otherwise a natively-backfilling provider would swallow every add and
-   * the pool could never start.
+   * the pool could never start. Also recorded on the pool at creation as
+   * its upstreamConfigured seed value.
    */
-  upstreamExistedBefore?: boolean
+  upstreamExisted?: boolean
   /**
    * True when the login observably backfilled a native credential: either a
    * watched auth file in the agent dir was created/modified across the login,
@@ -140,11 +141,10 @@ export interface UpstreamFirstAddSnapshot {
  */
 export function shouldSaveAsUpstreamOnly(snapshot: UpstreamFirstAddSnapshot): boolean {
   return !snapshot.poolExistedBefore
-    && snapshot.upstreamExistedBefore !== true
+    && snapshot.upstreamExisted !== true
     && snapshot.method !== 'api_key_paste'
     && snapshot.providerBackfilledNative
 }
-
 export interface UpstreamDuplicateWarningSnapshot {
   savedAsUpstreamOnly: boolean
   method: string
@@ -193,6 +193,23 @@ export type WatchedAuthFiles = Record<string, { mtimeMs: number; size: number; h
 export const KNOWN_AUTH_FILE_NAMES: readonly string[] = [
   'antigravity-accounts.json',
 ]
+
+/**
+ * Provider-owned native stores we can attribute to a specific provider id.
+ * Used to recover upstream existence for legacy pools (created before
+ * `upstreamConfigured` was persisted): the provider's own store being present
+ * in the agent dir is observational evidence its ambient upstream credential
+ * exists, even though Pi core cannot see that store.
+ */
+export const KNOWN_PROVIDER_AUTH_FILES: Readonly<Record<string, string>> = {
+  'antigravity-accounts.json': 'antigravity',
+}
+
+/** The provider-owned native store filename recorded for a provider, if any. */
+export function knownProviderAuthFileName(providerId: string): string | undefined {
+  return Object.entries(KNOWN_PROVIDER_AUTH_FILES)
+    .find(([, mappedId]) => mappedId === providerId)?.[0]
+}
 
 /** Files larger than this are compared by metadata only, never hashed or read. */
 export const AUTH_WATCH_MAX_BYTES = 512 * 1024

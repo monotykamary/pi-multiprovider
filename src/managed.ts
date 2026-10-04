@@ -201,7 +201,12 @@ export function createManagedIntegration<TApi extends Api>(
     const pool = await store.getPool(provider.id)
     if (pool === undefined) return []
     const result: ProviderAccount<string>[] = []
-    if (pool.includeUpstream) {
+    // upstreamConfigured === false means no live upstream credential was
+    // observed when the pool was created (e.g. only a fallback-embedded
+    // placeholder key): don't offer a phantom upstream slot that resolves to
+    // a credential the provider never logged in. Absent field = legacy pool,
+    // keep including it until the manager derives and persists the value.
+    if (pool.includeUpstream && pool.upstreamConfigured !== false) {
       result.push({
         id: PI_UPSTREAM_ACCOUNT_ID,
         label: pool.upstream?.label ?? 'Pi default',

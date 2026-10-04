@@ -20,6 +20,7 @@ import {
   changedWatchedAuthFiles,
   isUpstreamConfigured,
   isWatchedAuthFileName,
+  knownProviderAuthFileName,
   liveUpstreamConfigured,
   LoginDialogHostComponent,
   loginCredential,
@@ -282,6 +283,11 @@ describe('upstream duplicate notice', () => {
     expect(liveUpstreamConfigured(undefined)).toBe(false)
   })
 
+  it('maps provider-owned native stores to their provider for legacy upstream recovery', () => {
+    expect(knownProviderAuthFileName('antigravity')).toBe('antigravity-accounts.json')
+    expect(knownProviderAuthFileName('cursor')).toBeUndefined()
+  })
+
   it('reports unconfigured when there is no session runtime', () => {
     const ctx = { modelRegistry: {} } as unknown as ExtensionContext
     expect(isUpstreamConfigured(ctx, 'antigravity')).toBe(false)
@@ -331,7 +337,7 @@ describe('upstream-first first add', () => {
       poolExistedBefore: false,
       method: 'oauth',
       providerBackfilledNative: true,
-      upstreamExistedBefore: true,
+      upstreamExisted: true,
     })).toBe(false)
   })
 
@@ -344,7 +350,7 @@ describe('upstream-first first add', () => {
       poolExistedBefore: false,
       method: 'oauth',
       providerBackfilledNative: true,
-      upstreamExistedBefore: true,
+      upstreamExisted: true,
     })).toBe(false)
   })
 
