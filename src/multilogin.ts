@@ -93,6 +93,15 @@ export interface UpstreamFirstAddSnapshot {
   poolExistedBefore: boolean
   method: string
   /**
+   * True when an upstream credential (or the pending-upstream marker for a
+   * provider whose native store Pi core cannot see) already predates this
+   * add. Upstream-first only applies to the add that CREATES the upstream
+   * credential; once it exists, further adds must take the pool path —
+   * otherwise a natively-backfilling provider would swallow every add and
+   * the pool could never start.
+   */
+  upstreamExistedBefore?: boolean
+  /**
    * True when the login observably backfilled a native credential: either a
    * watched auth file in the agent dir was created/modified across the login,
    * or Pi core status flipped from unconfigured to configured. The file
@@ -119,6 +128,7 @@ export interface UpstreamFirstAddSnapshot {
  */
 export function shouldSaveAsUpstreamOnly(snapshot: UpstreamFirstAddSnapshot): boolean {
   return !snapshot.poolExistedBefore
+    && snapshot.upstreamExistedBefore !== true
     && snapshot.method !== 'api_key_paste'
     && snapshot.providerBackfilledNative
 }

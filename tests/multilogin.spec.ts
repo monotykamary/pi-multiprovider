@@ -318,6 +318,28 @@ describe('upstream-first first add', () => {
     })).toBe(false)
   })
 
+  it('pools normally when an upstream credential already existed before the add', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      method: 'oauth',
+      providerBackfilledNative: true,
+      upstreamExistedBefore: true,
+    })).toBe(false)
+  })
+
+  it('pools normally when the pending upstream marker already exists (second add starts the pool)', () => {
+    // Pi core cannot see provider-owned native stores, so for e.g.
+    // Antigravity the upstreamExistedBefore signal is the store marker, not
+    // core status. Without this, a natively-backfilling provider would
+    // swallow every add and the pool could never start.
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      method: 'oauth',
+      providerBackfilledNative: true,
+      upstreamExistedBefore: true,
+    })).toBe(false)
+  })
+
   it('pools normally when the login left native state untouched (pure login)', () => {
     expect(shouldSaveAsUpstreamOnly({
       poolExistedBefore: false,

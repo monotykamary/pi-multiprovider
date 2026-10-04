@@ -1294,6 +1294,11 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                 poolExistedBefore,
                 method,
                 providerBackfilledNative,
+                // Pending marker counts: Pi core cannot see provider-owned
+                // native stores, so for e.g. Antigravity the marker is the
+                // only proof an upstream credential already exists.
+                upstreamExistedBefore: upstreamBefore
+                  || (await store.getUpstreamOnlyMarkers())[provider.id] !== undefined,
               })
               if (saveAsUpstreamOnly) {
                 credential = undefined
@@ -1304,7 +1309,10 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                 // marker: core status already sees those at display time.
                 if (attributedAuthFiles.length > 0) await store.markUpstreamOnly(provider.id, attributedAuthFiles)
                 await reconcile(ctx)
-                ctx.ui.notify(upstreamOnlyNotice(provider.name, label), 'info')
+                // warning, not info: info notifies render as a dim status
+                // line that later notifies overwrite in place, and this
+                // notice is the only trace of a discarded typed label.
+                ctx.ui.notify(upstreamOnlyNotice(provider.name, label), 'warning')
               } else {
                 try {
                   await store.addAccount(provider.id, {
@@ -1323,16 +1331,19 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                   })
                   credential = undefined
                   await reconcile(ctx)
+                  const duplicateWarning = shouldWarnUpstreamDuplicate({
+                    savedAsUpstreamOnly: false,
+                    method,
+                    providerBackfilledNative,
+                    upstreamConfiguredAfter: upstreamAfter,
+                  })
                   ctx.ui.notify(
-                    shouldWarnUpstreamDuplicate({
-                      savedAsUpstreamOnly: false,
-                      method,
-                      providerBackfilledNative,
-                      upstreamConfiguredAfter: upstreamAfter,
-                    })
+                    duplicateWarning
                       ? upstreamDuplicateNotice(provider.name, label)
                       : `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
-                    'info',
+                    // Duplication warning must be visible; plain success can
+                    // stay a transient status line (the manager also opens).
+                    duplicateWarning ? 'warning' : 'info',
                   )
                 } catch (error) {
                   credential = undefined
