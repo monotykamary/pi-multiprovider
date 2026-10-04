@@ -10,6 +10,7 @@ import type {
   StreamOptions,
 } from '@earendil-works/pi-ai'
 import { MultiAuthStore } from './auth-store.ts'
+import { MULTIPOOL_AUTH_SOURCE } from './multilogin.ts'
 import type {
   AccountAttemptContext,
   AccountRequestContext,
@@ -136,7 +137,7 @@ export function mergeProviderAuth(
         }
       }
       return await hasStoredAccounts()
-        ? { type: 'api_key', source: 'multiprovider account pool' }
+        ? { type: 'api_key', source: MULTIPOOL_AUTH_SOURCE }
         : undefined
     },
     async resolve(input) {
@@ -149,7 +150,7 @@ export function mergeProviderAuth(
         }
       }
       return await hasStoredAccounts()
-        ? markAuthResult({ auth: {}, source: 'multiprovider account pool' }, false)
+        ? markAuthResult({ auth: {}, source: MULTIPOOL_AUTH_SOURCE }, false)
         : undefined
     },
   }

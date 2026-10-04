@@ -71,15 +71,28 @@ export function probeSessionRuntime(ctx: ExtensionContext): SessionRuntime | und
  * touches upstream, so it is excluded by the caller via `method`.
  */
 /**
+ * Auth source reported by multiprovider's own auth wrapper when a pool has
+ * accounts (src/managed.ts). Shared so the upstream-evidence helper can
+ * recognize — and exclude — itself: when Pi core reports this source, the
+ * "credential" it found is the pool serving its own accounts, which is
+ * circular evidence, not an upstream the user logged into.
+ */
+export const MULTIPOOL_AUTH_SOURCE = 'multiprovider account pool'
+
+/**
  * A "fallback" source means the key is statically embedded by an extension
  * (e.g. pi-cursor-sdk's non-functional placeholder), not a live login, so it
  * must not count as an upstream credential — the upstream row would otherwise
- * point at a placeholder the user never set.
+ * point at a placeholder the user never set. The pool's own auth source is
+ * likewise circular: a provider with a pool but no upstream login must not
+ * look like it has one just because the pool answers core's status probe.
  */
 export function liveUpstreamConfigured(
   status?: { configured?: boolean; source?: string },
 ): boolean {
-  return status?.configured === true && status.source !== 'fallback'
+  return status?.configured === true
+    && status.source !== 'fallback'
+    && status.source !== MULTIPOOL_AUTH_SOURCE
 }
 
 export function isUpstreamConfigured(ctx: ExtensionContext, providerId: string): boolean {

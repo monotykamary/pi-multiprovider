@@ -1138,6 +1138,18 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
             await store.setUpstreamConfigured(provider.id, true)
             pool.upstreamConfigured = true
           }
+          // Records written before the pool's own auth source was excluded
+          // from upstream evidence say true on circular grounds only (Pi
+          // core saw the pool serving itself). When core answers and reports
+          // no live credential — and the provider has no known native store
+          // to re-verify — the recorded upstream has no remaining evidence:
+          // downgrade so display and rotation stop showing a phantom row.
+          if (pool !== undefined && pool.upstreamConfigured === true
+            && !statusConfigured && upstreamStatus !== undefined
+            && knownProviderAuthFileName(provider.id) === undefined) {
+            await store.setUpstreamConfigured(provider.id, false)
+            pool.upstreamConfigured = false
+          }
           const upstreamConfigured = statusConfigured
             || pendingIds.has(provider.id)
             || (pool?.upstreamConfigured === true)

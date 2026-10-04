@@ -22,6 +22,7 @@ import {
   isWatchedAuthFileName,
   knownProviderAuthFileName,
   liveUpstreamConfigured,
+  MULTIPOOL_AUTH_SOURCE,
   LoginDialogHostComponent,
   loginCredential,
   markerPendingUpstreamIds,
@@ -281,6 +282,10 @@ describe('upstream duplicate notice', () => {
     expect(liveUpstreamConfigured({ configured: true, source: 'login' })).toBe(true)
     expect(liveUpstreamConfigured({ configured: true, source: 'environment' })).toBe(true)
     expect(liveUpstreamConfigured(undefined)).toBe(false)
+  })
+
+  it('does not count the pool serving itself as upstream evidence (circular status)', () => {
+    expect(liveUpstreamConfigured({ configured: true, source: MULTIPOOL_AUTH_SOURCE })).toBe(false)
   })
 
   it('maps provider-owned native stores to their provider for legacy upstream recovery', () => {
