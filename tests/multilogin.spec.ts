@@ -15,8 +15,10 @@ import {
   isUpstreamConfigured,
   LoginDialogHostComponent,
   loginCredential,
+  shouldSaveAsUpstreamOnly,
   showLoginDialog,
   upstreamDuplicateNotice,
+  upstreamOnlyNotice,
 } from '../src/multilogin.ts'
 
 const model: Model<'test-api'> = {
@@ -281,6 +283,60 @@ describe('upstream duplicate notice', () => {
   it('notice names the pool rows and points at the upstream toggle', () => {
     const message = upstreamDuplicateNotice('Antigravity', 'bn')
     expect(message).toContain('bn')
+    expect(message).toContain('Antigravity')
+    expect(message).toContain('upstream')
+    expect(message).toContain('/multilogin')
+  })
+})
+
+describe('upstream-first first add', () => {
+  it('saves as upstream only for a new pool whose login backfilled native upstream', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      upstreamBefore: false,
+      method: 'oauth',
+      upstreamAfter: true,
+    })).toBe(true)
+  })
+
+  it('pools normally when the pool already existed', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: true,
+      upstreamBefore: false,
+      method: 'oauth',
+      upstreamAfter: true,
+    })).toBe(false)
+  })
+
+  it('pools normally when upstream was already configured', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      upstreamBefore: true,
+      method: 'oauth',
+      upstreamAfter: true,
+    })).toBe(false)
+  })
+
+  it('pools normally when the login left upstream empty (pure login)', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      upstreamBefore: false,
+      method: 'oauth',
+      upstreamAfter: false,
+    })).toBe(false)
+  })
+
+  it('pools normally for the paste-API-key flow, which never touches upstream', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      upstreamBefore: false,
+      method: 'api_key_paste',
+      upstreamAfter: true,
+    })).toBe(false)
+  })
+
+  it('upstream-only notice names the provider and the next step', () => {
+    const message = upstreamOnlyNotice('Antigravity')
     expect(message).toContain('Antigravity')
     expect(message).toContain('upstream')
     expect(message).toContain('/multilogin')

@@ -85,6 +85,39 @@ export function upstreamDuplicateNotice(providerName: string, accountLabel: stri
   return `Added ${accountLabel} to ${providerName}. This login may also have saved the native Pi credential, in which case the pool's upstream row and "${accountLabel}" are the same account counted twice — disable upstream in /multilogin if so.`
 }
 
+export interface UpstreamFirstAddSnapshot {
+  poolExistedBefore: boolean
+  upstreamBefore: boolean
+  method: string
+  upstreamAfter: boolean
+}
+
+/**
+ * Decides whether a fresh add through a provider login dialog should become
+ * the native upstream credential instead of a pooled copy. True only when the
+ * pool is new, upstream was empty before the login, and the login backfilled
+ * it — i.e. the provider persists to its own native store as a side effect
+ * (Antigravity's loginAndRemember). Pure logins leave upstream empty, and the
+ * paste-API-key flow never touches it, so both fall through to the pool path.
+ * Observing the flip keeps multiprovider read-only: it never writes native
+ * credentials itself, it just refrains from duplicating them.
+ */
+export function shouldSaveAsUpstreamOnly(snapshot: UpstreamFirstAddSnapshot): boolean {
+  return !snapshot.poolExistedBefore
+    && !snapshot.upstreamBefore
+    && snapshot.method !== 'api_key_paste'
+    && snapshot.upstreamAfter
+}
+
+/**
+ * Notice for the upstream-first path: the typed pool label is unused because
+ * no pooled copy is stored, and pre-add pool preferences cannot persist
+ * without an account, so both are named plainly.
+ */
+export function upstreamOnlyNotice(providerName: string): string {
+  return `Saved as the native ${providerName} credential (upstream). No pool created — the next /multilogin add will start one.`
+}
+
 function loginOptions(
   providers: readonly Provider<Api>[],
   statusFor: (providerId: string) => { type: AuthType; source?: string } | undefined,
