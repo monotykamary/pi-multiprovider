@@ -51,7 +51,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { attributeChangedFilesToSecrets, attributableSecrets, changedWatchedAuthFiles, isUpstreamConfigured, liveUpstreamConfigured, markerPendingUpstreamIds, pendingUpstreamProviders, pendingUpstreamStatusLines, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
+import { attributeChangedFilesToSecrets, attributableSecrets, changedWatchedAuthFiles, isUpstreamConfigured, knownProviderAuthFileName, liveUpstreamConfigured, markerPendingUpstreamIds, pendingUpstreamProviders, pendingUpstreamStatusLines, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -1115,10 +1115,32 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
             ctx,
             pool === undefined ? new Set() : new Set([provider.id]),
           )).map(entry => entry.id))
-          const upstreamConfigured = statusConfigured || pendingIds.has(provider.id)
           const upstreamSource = statusConfigured && upstreamStatus !== undefined
             ? (upstreamStatus.label ?? upstreamStatus.source)
             : undefined
+          // Legacy pools predate the persisted upstreamConfigured field:
+          // derive it once from live evidence (core status, or the provider's
+          // own native store being present — Pi core is blind to that store,
+          // e.g. antigravity-accounts.json) and persist it so the rotation
+          // and display stop guessing.
+          if (pool !== undefined && pool.upstreamConfigured === undefined) {
+            const knownFile = knownProviderAuthFileName(provider.id)
+            const present = knownFile === undefined ? false
+              : (await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE]))[knownFile] !== undefined
+            const derived = statusConfigured || present
+            await store.setUpstreamConfigured(provider.id, derived)
+            pool.upstreamConfigured = derived
+          }
+          // A live core credential observed while the pool says no-upstream
+          // is newer evidence: upgrade the record so display and rotation
+          // agree.
+          if (pool !== undefined && pool.upstreamConfigured === false && statusConfigured) {
+            await store.setUpstreamConfigured(provider.id, true)
+            pool.upstreamConfigured = true
+          }
+          const upstreamConfigured = statusConfigured
+            || pendingIds.has(provider.id)
+            || (pool?.upstreamConfigured === true)
           const upstreamState = {
             ...(upstreamConfigured ? { upstreamConfigured } : {}),
             ...(upstreamSource === undefined ? {} : { upstreamSource }),
@@ -1279,6 +1301,11 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
             } else if (login !== undefined) {
               let credential: Credential | undefined = login.credential
               const upstreamAfter = isUpstreamConfigured(ctx, provider.id)
+              // One upstream-existence signal for both the upstream-first gate
+              // and the pool's upstreamConfigured record (core status is blind
+              // to provider-owned native stores; the marker is its only trace).
+              const upstreamExisted = upstreamBefore
+                || (await store.getUpstreamOnlyMarkers())[provider.id] !== undefined
               const authFilesAfter = await snapshotWatchedAuthFiles(agentDir, [MULTIPROVIDER_AUTH_FILE])
               const changedAuthFiles = changedWatchedAuthFiles(authFilesBefore, authFilesAfter)
               // Attribute the rewrite to this login when possible: with
@@ -1296,11 +1323,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                 poolExistedBefore,
                 method,
                 providerBackfilledNative,
-                // Pending marker counts: Pi core cannot see provider-owned
-                // native stores, so for e.g. Antigravity the marker is the
-                // only proof an upstream credential already exists.
-                upstreamExistedBefore: upstreamBefore
-                  || (await store.getUpstreamOnlyMarkers())[provider.id] !== undefined,
+                upstreamExisted,
               })
               if (saveAsUpstreamOnly) {
                 credential = undefined
@@ -1322,6 +1345,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                     credential,
                     ...(await store.getPool(provider.id) === undefined
                       ? {
+                          upstreamConfigured: upstreamExisted,
                           pool: {
                             policy: buffer.policy,
                             affinity: buffer.affinity,
