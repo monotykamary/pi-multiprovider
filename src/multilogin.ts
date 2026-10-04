@@ -1,4 +1,5 @@
-import { readdir, stat } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type {
   Api,
@@ -146,22 +147,48 @@ export function shouldWarnUpstreamDuplicate(snapshot: UpstreamDuplicateWarningSn
 const AUTH_WATCH_SKIP_SUFFIXES = ['.lock', '.tmp']
 
 /**
- * Metadata snapshot of the agent dir's auth-ish files (names plus mtime and
- * size only — contents are never read). Compared across a provider login to
- * detect a native-store side effect the Pi core status cannot see.
+ * Content-hash snapshot of the agent dir's auth-ish files (names plus
+ * mtime, size, and a SHA-256 of contents for files within
+ * AUTH_WATCH_MAX_BYTES). Compared across a provider login to detect a
+ * native-store side effect the Pi core status cannot see; snapshots then
+ * narrow changed files by attribution (see attributeChangedFilesToSecrets),
+ * so a concurrent unrelated rewrite inside the login window no longer
+ * counts — only files containing this login's fresh secret do.
  *
  * `exclude` names multiprovider's own store, which the caller has not yet
- * written at snapshot time but must never count. Concurrent unrelated
- * rewrites inside the login window (e.g. another account's token refresh)
- * can false-positive; the consequence is bounded (upstream-first keeps one
- * serving row, and the notice names what happened), and the next add takes
- * the normal pool path.
+ * written at snapshot time but must never count. When attribution is
+ * impossible (no secret to check with, or a natively-encrypted store),
+ * callers fall back to the raw change heuristic.
  */
-export type WatchedAuthFiles = Record<string, { mtimeMs: number; size: number }>
+export type WatchedAuthFiles = Record<string, { mtimeMs: number; size: number; hash?: string }>
+
+/**
+ * Exact native-store filenames known to hold provider credentials, checked
+ * in addition to the name pattern below. Entries are literal filenames that
+ * only match when present, so a wrong entry is harmless — the attribution
+ * check still has to confirm the fresh secret landed in the file.
+ */
+export const KNOWN_AUTH_FILE_NAMES: readonly string[] = [
+  'antigravity-accounts.json',
+]
+
+/** Files larger than this are compared by metadata only, never hashed or read. */
+export const AUTH_WATCH_MAX_BYTES = 512 * 1024
+
+async function hashAuthFile(dir: string, name: string): Promise<string | undefined> {
+  try {
+    const info = await stat(join(dir, name))
+    if (!info.isFile() || info.size > AUTH_WATCH_MAX_BYTES) return undefined
+    return createHash('sha256').update(await readFile(join(dir, name))).digest('hex')
+  } catch {
+    return undefined
+  }
+}
 
 export function isWatchedAuthFileName(name: string, exclude: readonly string[] = []): boolean {
   if (exclude.includes(name)) return false
   if (AUTH_WATCH_SKIP_SUFFIXES.some(suffix => name.endsWith(suffix))) return false
+  if ((KNOWN_AUTH_FILE_NAMES as readonly string[]).includes(name)) return true
   return /(auth|account|credential|login)/i.test(name)
 }
 
@@ -181,7 +208,13 @@ export async function snapshotWatchedAuthFiles(
     try {
       const info = await stat(join(dir, name))
       if (!info.isFile()) continue
-      snapshot[name] = { mtimeMs: info.mtimeMs, size: info.size }
+      const entry: { mtimeMs: number; size: number; hash?: string } = {
+        mtimeMs: info.mtimeMs,
+        size: info.size,
+      }
+      const hash = await hashAuthFile(dir, name)
+      if (hash !== undefined) entry.hash = hash
+      snapshot[name] = entry
     } catch {
       continue
     }
@@ -189,18 +222,68 @@ export async function snapshotWatchedAuthFiles(
   return snapshot
 }
 
-/** Names created or metadata-changed between two snapshots. */
+/**
+ * Names created or content-changed between two snapshots. Content hashes
+ * decide whenever both sides have one (immune to mtime granularity and
+ * same-size rewrites); metadata is only the fallback for unreadable or
+ * oversized files.
+ */
 export function changedWatchedAuthFiles(before: WatchedAuthFiles, after: WatchedAuthFiles): string[] {
   const changed: string[] = []
   for (const [name, state] of Object.entries(after)) {
     const previous = before[name]
     if (previous === undefined) {
       changed.push(name)
+    } else if (previous.hash !== undefined && state.hash !== undefined) {
+      if (previous.hash !== state.hash) changed.push(name)
     } else if (previous.mtimeMs !== state.mtimeMs || previous.size !== state.size) {
       changed.push(name)
     }
   }
   return changed
+}
+
+/**
+ * Secrets from a fresh credential usable to attribute a native-store write
+ * to this login. Refresh tokens, access tokens, and API keys are long
+ * random strings; a changed file containing one verbatim is evidence this
+ * login wrote it, not a concurrent unrelated rewrite. Both OAuth tokens
+ * are needles because some stores persist only the access token.
+ */
+export function attributableSecrets(credential: Credential): string[] {
+  if (credential.type === 'oauth') return [credential.refresh, credential.access].filter(secret => secret !== '')
+  return credential.key === undefined || credential.key === '' ? [] : [credential.key]
+}
+
+/**
+ * Narrows changed files to the ones containing a fresh secret verbatim.
+ * File bytes are decoded in memory, compared, and dropped — never logged,
+ * never persisted. When there is nothing to attribute with (empty secrets),
+ * returns no attribution so callers fall back to the change heuristic.
+ */
+export async function attributeChangedFilesToSecrets(
+  dir: string,
+  files: readonly string[],
+  secrets: readonly string[],
+): Promise<string[]> {
+  const needles = secrets.filter(secret => secret !== '')
+  if (needles.length === 0) return []
+  const attributed: string[] = []
+  for (const name of files) {
+    let text: string | undefined
+    try {
+      // latin1 maps every byte 1:1, so binary envelopes cannot hide a match.
+      text = (await readFile(join(dir, name))).toString('latin1')
+    } catch {
+      continue
+    }
+    try {
+      if (needles.some(needle => text?.includes(needle) === true)) attributed.push(name)
+    } finally {
+      text = undefined
+    }
+  }
+  return attributed
 }
 
 /**
