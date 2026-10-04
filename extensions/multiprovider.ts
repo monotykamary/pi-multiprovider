@@ -49,7 +49,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { promptApiKeyCredential, probeSessionRuntime, selectLogin, showLoginDialog } from '../src/multilogin.ts'
+import { isUpstreamConfigured, promptApiKeyCredential, probeSessionRuntime, selectLogin, showLoginDialog, upstreamDuplicateNotice } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -1160,7 +1160,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                 if (service.hasProvider(provider.id)) service.resetHealth(provider.id, account.id)
                 await reconcile(ctx)
                 ctx.ui.notify(
-                  `Reauthenticated ${account.label} for ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
+                  `Reauthenticated ${account.label} for ${provider.name}. Credentials saved to ${getMultiAuthPath()}${result.method !== 'api_key_paste' && isUpstreamConfigured(ctx, provider.id) ? ' This login may also have updated the native Pi credential, in which case the pool\'s upstream row and the pooled account are the same account counted twice — disable upstream in /multilogin if so.' : ''}`,
                   'info',
                 )
               } catch (error) {
@@ -1199,7 +1199,9 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
                 credential = undefined
                 await reconcile(ctx)
                 ctx.ui.notify(
-                  `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
+                  method !== 'api_key_paste' && isUpstreamConfigured(ctx, provider.id)
+                    ? upstreamDuplicateNotice(provider.name, label)
+                    : `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
                   'info',
                 )
               } catch (error) {

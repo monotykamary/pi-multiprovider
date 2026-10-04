@@ -58,6 +58,33 @@ export function probeSessionRuntime(ctx: ExtensionContext): SessionRuntime | und
   return candidate as unknown as SessionRuntime
 }
 
+/**
+ * True when Pi reports a live native credential for the provider. A pooled
+ * login performed through the provider's own login dialog (e.g. Antigravity's
+ * loginAndRemember) can also create or update that native credential as a
+ * side effect, leaving the pool's upstream row and the new stored account
+ * pointing at the same underlying account. The paste-API-key flow never
+ * touches upstream, so it is excluded by the caller via `method`.
+ */
+export function isUpstreamConfigured(ctx: ExtensionContext, providerId: string): boolean {
+  try {
+    return probeSessionRuntime(ctx)?.getProviderAuthStatus(providerId)?.configured === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Builds the notice shown after a pooled account is added (or reauthenticated)
+ * through a provider login dialog while upstream is configured. Worded as a
+ * possibility, not a certainty: an upstream credential for a genuinely
+ * different account is legitimate, but a provider-owned login dialog may have
+ * duplicated it, so the operator should verify.
+ */
+export function upstreamDuplicateNotice(providerName: string, accountLabel: string): string {
+  return `Added ${accountLabel} to ${providerName}. This login may also have saved the native Pi credential, in which case the pool's upstream row and "${accountLabel}" are the same account counted twice — disable upstream in /multilogin if so.`
+}
+
 function loginOptions(
   providers: readonly Provider<Api>[],
   statusFor: (providerId: string) => { type: AuthType; source?: string } | undefined,

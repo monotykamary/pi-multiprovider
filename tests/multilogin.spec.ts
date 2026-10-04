@@ -12,9 +12,11 @@ import {
 import type { TUI } from '@earendil-works/pi-tui'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  isUpstreamConfigured,
   LoginDialogHostComponent,
   loginCredential,
   showLoginDialog,
+  upstreamDuplicateNotice,
 } from '../src/multilogin.ts'
 
 const model: Model<'test-api'> = {
@@ -237,5 +239,50 @@ describe('/multilogin provider auth', () => {
 
     const result = await dialogPromise
     expect(result).toBeUndefined()
+  })
+})
+
+describe('upstream duplicate notice', () => {
+  function ctxWithUpstream(configured: boolean): ExtensionContext {
+    return {
+      modelRegistry: {
+        runtime: {
+          getProviders: () => [],
+          getProviderAuthStatus: () => ({ configured }),
+          isUsingOAuth: () => true,
+        },
+      },
+    } as unknown as ExtensionContext
+  }
+
+  it('reports upstream as configured only when the runtime says so', () => {
+    expect(isUpstreamConfigured(ctxWithUpstream(true), 'antigravity')).toBe(true)
+    expect(isUpstreamConfigured(ctxWithUpstream(false), 'antigravity')).toBe(false)
+  })
+
+  it('reports unconfigured when there is no session runtime', () => {
+    const ctx = { modelRegistry: {} } as unknown as ExtensionContext
+    expect(isUpstreamConfigured(ctx, 'antigravity')).toBe(false)
+  })
+
+  it('reports unconfigured when the runtime probe throws', () => {
+    const ctx = {
+      modelRegistry: {
+        runtime: {
+          getProviders: () => [],
+          getProviderAuthStatus: () => { throw new Error('unavailable') },
+          isUsingOAuth: () => true,
+        },
+      },
+    } as unknown as ExtensionContext
+    expect(isUpstreamConfigured(ctx, 'antigravity')).toBe(false)
+  })
+
+  it('notice names the pool rows and points at the upstream toggle', () => {
+    const message = upstreamDuplicateNotice('Antigravity', 'bn')
+    expect(message).toContain('bn')
+    expect(message).toContain('Antigravity')
+    expect(message).toContain('upstream')
+    expect(message).toContain('/multilogin')
   })
 })
