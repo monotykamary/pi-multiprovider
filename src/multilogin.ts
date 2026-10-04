@@ -205,10 +205,49 @@ export function changedWatchedAuthFiles(before: WatchedAuthFiles, after: Watched
 /**
  * Notice for the upstream-first path: the typed pool label is unused because
  * no pooled copy is stored, and pre-add pool preferences cannot persist
- * without an account, so both are named plainly.
+ * without an account, so both are named plainly. Names the discarded label
+ * so the operator does not go looking for it in /accounts.
  */
-export function upstreamOnlyNotice(providerName: string): string {
-  return `Saved as the native ${providerName} credential (upstream). No pool created — the next /multilogin add will start one.`
+export function upstreamOnlyNotice(providerName: string, label?: string): string {
+  const kept = label === undefined || label.trim() === ''
+    ? ''
+    : ` Label "${label.trim()}" was not kept —`
+  return `Saved as the native ${providerName} credential (upstream).${kept} No pool created — the next /multilogin add will start one.`
+}
+
+export interface PendingUpstreamProvider {
+  id: string
+  label: string
+}
+
+/**
+ * Providers with a live native credential but no pool: the upstream-first
+ * add state. Pure over injected inputs so the commands stay thin; the
+ * caller supplies the full provider list, the pooled ids, and Pi core
+ * status. Pi core status is blind to provider-owned native stores, so a
+ * freshly backfilled credential can be missing here until Pi re-resolves —
+ * the notice shown at add time already covered that moment.
+ */
+export function pendingUpstreamProviders(
+  all: readonly PendingUpstreamProvider[],
+  pooledIds: ReadonlySet<string>,
+  isConfigured: (providerId: string) => boolean,
+): PendingUpstreamProvider[] {
+  return all.filter(provider => !pooledIds.has(provider.id) && isConfigured(provider.id))
+}
+
+/**
+ * `/accounts` lines for pending upstream providers, in the same two-space
+ * style as the pooled account lines. Deliberately claims no account
+ * identity: multiprovider observed a native write, not which account.
+ */
+export function pendingUpstreamStatusLines(pending: readonly PendingUpstreamProvider[]): string[] {
+  const lines: string[] = []
+  for (const provider of pending) {
+    lines.push(`${provider.label} (${provider.id}) · no pool yet`)
+    lines.push('  Pi default (upstream) · native credential, not pooled · next /multilogin add starts the pool')
+  }
+  return lines
 }
 
 function loginOptions(

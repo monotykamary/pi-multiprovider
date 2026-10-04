@@ -51,7 +51,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { changedWatchedAuthFiles, isUpstreamConfigured, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
+import { changedWatchedAuthFiles, isUpstreamConfigured, pendingUpstreamProviders, pendingUpstreamStatusLines, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -1217,7 +1217,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               if (saveAsUpstreamOnly) {
                 credential = undefined
                 await reconcile(ctx)
-                ctx.ui.notify(upstreamOnlyNotice(provider.name), 'info')
+                ctx.ui.notify(upstreamOnlyNotice(provider.name, label), 'info')
               } else {
                 try {
                   await store.addAccount(provider.id, {
@@ -1271,7 +1271,20 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         (await store.listProviderIds()).map(providerId => store.getPool(providerId)),
       )).filter(pool => pool !== undefined)
       if (pools.length === 0) {
-        ctx.ui.notify('No multilogin accounts are stored.', 'info')
+        // Nothing pooled to remove, but a pending native credential may be
+        // why the operator came here — point at its real owner instead of
+        // reading as "the account vanished".
+        const pending = pendingUpstreamProviders(
+          uniqueProviders(ctx, baseProviders).map(provider => ({ id: provider.id, label: provider.name })),
+          new Set(),
+          providerId => probeSessionRuntime(ctx)?.getProviderAuthStatus(providerId)?.configured === true,
+        )
+        ctx.ui.notify(
+          pending.length === 0
+            ? 'No multilogin accounts are stored.'
+            : `No multilogin accounts are stored. Native upstream credentials (${pending.map(provider => provider.label).join(', ')}) are separate — manage them via /login or the provider's own accounts command.`,
+          'info',
+        )
         return
       }
       const ref = args.trim().toLowerCase()
@@ -1311,15 +1324,27 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     handler: async (_args, ctx) => {
       await reconcile(ctx)
       const snapshot = await service.snapshot()
-      if (snapshot.providers.length === 0) {
+      const runtime = probeSessionRuntime(ctx)
+      // Providers with a live native credential but no pool yet (e.g. after
+      // an upstream-first /multilogin add) would otherwise vanish from this
+      // list entirely — show them as pending, mirroring the pool manager.
+      const pooledIds = new Set(snapshot.providers.map(provider => provider.id))
+      const pending = pendingUpstreamProviders(
+        uniqueProviders(ctx, baseProviders).map(provider => ({ id: provider.id, label: provider.name })),
+        pooledIds,
+        providerId => runtime?.getProviderAuthStatus(providerId)?.configured === true,
+      )
+      if (snapshot.providers.length === 0 && pending.length === 0) {
         ctx.ui.notify('No account pools are configured. Use /multilogin to add one.', 'info')
         return
       }
-      const runtime = probeSessionRuntime(ctx)
-      await ctx.ui.select('Provider Accounts', statusLines(snapshot, providerId => {
-        const status = runtime?.getProviderAuthStatus(providerId)
-        return status?.configured === false || status?.source === 'fallback'
-      }))
+      await ctx.ui.select('Provider Accounts', [
+        ...statusLines(snapshot, providerId => {
+          const status = runtime?.getProviderAuthStatus(providerId)
+          return status?.configured === false || status?.source === 'fallback'
+        }),
+        ...pendingUpstreamStatusLines(pending),
+      ])
     },
   })
 
