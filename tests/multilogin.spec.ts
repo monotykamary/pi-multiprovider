@@ -20,6 +20,7 @@ import {
   isWatchedAuthFileName,
   LoginDialogHostComponent,
   loginCredential,
+  markerPendingUpstreamIds,
   pendingUpstreamProviders,
   pendingUpstreamStatusLines,
   shouldSaveAsUpstreamOnly,
@@ -375,6 +376,27 @@ describe('pending upstream providers', () => {
       'Antigravity (antigravity) · no pool yet',
       '  Pi default (upstream) · native credential, not pooled · next /multilogin add starts the pool',
     ])
+  })
+})
+
+describe('upstream-only markers', () => {
+  const markers = {
+    antigravity: { addedAt: '2026-10-04T00:00:00.000Z', watchedFiles: ['antigravity-accounts.json'] },
+    openai: { addedAt: '2026-10-04T00:00:00.000Z', watchedFiles: ['auth.json'] },
+  }
+
+  it('keeps markers whose recorded native file is still present and unpooled', () => {
+    expect(markerPendingUpstreamIds(
+      markers,
+      new Set(),
+      new Set(['antigravity-accounts.json', 'models-store.json']),
+    )).toEqual(['antigravity'])
+  })
+
+  it('retires markers once a pool exists or the native file is gone', () => {
+    expect(markerPendingUpstreamIds(markers, new Set(['antigravity']), new Set(['antigravity-accounts.json'])))
+      .toEqual([])
+    expect(markerPendingUpstreamIds(markers, new Set(), new Set(['models-store.json']))).toEqual([])
   })
 })
 

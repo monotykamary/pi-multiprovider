@@ -16,6 +16,7 @@ import {
   type ExtensionContext,
 } from '@earendil-works/pi-coding-agent'
 import { Container, type Focusable, type TUI } from '@earendil-works/pi-tui'
+import type { UpstreamOnlyMarker } from './auth-store.ts'
 
 export interface LoginSelection {
   provider: Provider<Api>
@@ -234,6 +235,24 @@ export function pendingUpstreamProviders(
   isConfigured: (providerId: string) => boolean,
 ): PendingUpstreamProvider[] {
   return all.filter(provider => !pooledIds.has(provider.id) && isConfigured(provider.id))
+}
+
+/**
+ * Ids whose upstream-first marker is still live: no pool, and at least one
+ * recorded native file still present in the agent dir. Markers retire when a
+ * pool is created (see addAccount); a recorded file disappearing means the
+ * native credential was removed out-of-band, so the pending hint retires
+ * too instead of pointing at nothing.
+ */
+export function markerPendingUpstreamIds(
+  markers: Record<string, UpstreamOnlyMarker>,
+  pooledIds: ReadonlySet<string>,
+  filesPresent: ReadonlySet<string>,
+): string[] {
+  return Object.entries(markers)
+    .filter(([id, marker]) =>
+      !pooledIds.has(id) && marker.watchedFiles.some(file => filesPresent.has(file)))
+    .map(([id]) => id)
 }
 
 /**

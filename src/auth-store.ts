@@ -91,6 +91,20 @@ interface PersistedState {
   scheduler?: SchedulerSettings
   providers: Record<string, PersistedPool>
   virtuals?: Record<string, VirtualProviderConfig>
+  /**
+   * Providers whose last /multilogin add was kept as the native upstream
+   * credential instead of a pooled copy (upstream-first path). Records the
+   * native files observed changing across that login so display surfaces
+   * can keep showing the pending state even when Pi core status cannot see
+   * the provider-owned store. Cleared when a pool is created for the
+   * provider; a recorded file disappearing also retires the marker.
+   */
+  upstreamOnly?: Record<string, UpstreamOnlyMarker>
+}
+
+export interface UpstreamOnlyMarker {
+  addedAt: string
+  watchedFiles: string[]
 }
 
 const DEFAULT_POLICY: SelectionPolicy = 'round-robin'
@@ -306,6 +320,19 @@ function parseState(text: string): PersistedState {
       normalizeVirtualProvider(virtualValue)
     }
   }
+  if (candidate.upstreamOnly !== undefined) {
+    if (typeof candidate.upstreamOnly !== 'object' || candidate.upstreamOnly === null) {
+      throw new Error('multiprovider: malformed upstream-only markers')
+    }
+    for (const [providerId, markerValue] of Object.entries(candidate.upstreamOnly)) {
+      assertSafeKey(providerId, 'provider id')
+      const marker = markerValue as Partial<UpstreamOnlyMarker>
+      if (typeof marker.addedAt !== 'string' || !Array.isArray(marker.watchedFiles)
+        || !marker.watchedFiles.every(file => typeof file === 'string')) {
+        throw new Error(`multiprovider: malformed upstream-only marker for "${providerId}"`)
+      }
+    }
+  }
   return candidate as PersistedState
 }
 
@@ -418,12 +445,38 @@ export class MultiAuthStore {
     return (await this.getPool(providerId))?.accounts.some(account => account.enabled) ?? false
   }
 
+  async getUpstreamOnlyMarkers(): Promise<Record<string, UpstreamOnlyMarker>> {
+    return { ...((await this.readState()).upstreamOnly ?? {}) }
+  }
+
+  async markUpstreamOnly(providerId: string, watchedFiles: readonly string[]): Promise<void> {
+    assertSafeKey(providerId, 'provider id')
+    await this.mutate(state => {
+      state.upstreamOnly ??= {}
+      state.upstreamOnly[providerId] = {
+        addedAt: new Date().toISOString(),
+        watchedFiles: [...watchedFiles],
+      }
+    })
+  }
+
+  async clearUpstreamOnly(providerId: string): Promise<void> {
+    assertSafeKey(providerId, 'provider id')
+    await this.mutate(state => {
+      if (state.upstreamOnly !== undefined) delete state.upstreamOnly[providerId]
+    })
+  }
+
   async addAccount(providerId: string, input: AddMultiAuthAccount): Promise<MultiAuthAccount> {
     assertSafeKey(providerId, 'provider id')
     const label = input.label.trim()
     if (label === '') throw new Error('multiprovider: account label is required')
     assertCredential(input.credential)
     return this.mutate(state => {
+      const isNewPool = state.providers[providerId] === undefined
+      // A real pool supersedes the upstream-first marker: the provider is
+      // now represented explicitly, so the pending hint must retire.
+      if (isNewPool && state.upstreamOnly !== undefined) delete state.upstreamOnly[providerId]
       const pool = state.providers[providerId] ?? {
         policy: DEFAULT_POLICY,
         affinity: true,
