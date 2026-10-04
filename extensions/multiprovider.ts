@@ -51,7 +51,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { changedWatchedAuthFiles, isUpstreamConfigured, pendingUpstreamProviders, pendingUpstreamStatusLines, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
+import { changedWatchedAuthFiles, isUpstreamConfigured, markerPendingUpstreamIds, pendingUpstreamProviders, pendingUpstreamStatusLines, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -1024,6 +1024,38 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     currentContext = undefined
   })
 
+  /**
+   * Providers with a live native credential but no pool. Combines Pi core
+   * status with multiprovider's own upstream-first markers, which also
+   * cover providers whose native stores Pi core cannot see (e.g.
+   * Antigravity). Used by /accounts, /multilogout, and the pool manager so
+   * every surface agrees on the pending state.
+   */
+  const pendingUpstream = async (
+    ctx: ExtensionContext,
+    pooledIds: ReadonlySet<string>,
+  ): Promise<{ id: string; label: string }[]> => {
+    const runtime = probeSessionRuntime(ctx)
+    const all = uniqueProviders(ctx, baseProviders).map(provider => ({ id: provider.id, label: provider.name }))
+    const ids = new Set(pendingUpstreamProviders(
+      all,
+      pooledIds,
+      providerId => runtime?.getProviderAuthStatus(providerId)?.configured === true,
+    ).map(provider => provider.id))
+    const markers = await store.getUpstreamOnlyMarkers()
+    const unpooledMarkers = Object.keys(markers).filter(id => !pooledIds.has(id))
+    if (unpooledMarkers.length > 0) {
+      const present = new Set(Object.keys(
+        await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE]),
+      ))
+      for (const id of markerPendingUpstreamIds(markers, pooledIds, present)) ids.add(id)
+    }
+    const names = new Map(all.map(provider => [provider.id, provider.label]))
+    return [...ids]
+      .map(id => ({ id, label: names.get(id) ?? id }))
+      .sort((left, right) => left.label.localeCompare(right.label))
+  }
+
   pi.registerCommand('multilogin', {
     description: 'Manage a provider pool, Pi default auth, schedulers, and accounts',
     handler: async (args, ctx) => {
@@ -1058,8 +1090,13 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           const scheduler = await store.getSchedulerSettings()
           const runtime = probeSessionRuntime(ctx)
           const upstreamStatus = runtime?.getProviderAuthStatus(provider.id)
-          const upstreamConfigured = upstreamStatus !== undefined && upstreamStatus.configured
-          const upstreamSource = upstreamConfigured ? (upstreamStatus.label ?? upstreamStatus.source) : undefined
+          const statusConfigured = upstreamStatus !== undefined && upstreamStatus.configured
+          const pendingIds = new Set((await pendingUpstream(
+            ctx,
+            pool === undefined ? new Set() : new Set([provider.id]),
+          )).map(entry => entry.id))
+          const upstreamConfigured = statusConfigured || pendingIds.has(provider.id)
+          const upstreamSource = statusConfigured ? (upstreamStatus.label ?? upstreamStatus.source) : undefined
           const upstreamState = {
             ...(upstreamConfigured ? { upstreamConfigured } : {}),
             ...(upstreamSource === undefined ? {} : { upstreamSource }),
@@ -1207,7 +1244,8 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               let credential: Credential | undefined = login.credential
               const upstreamAfter = isUpstreamConfigured(ctx, provider.id)
               const authFilesAfter = await snapshotWatchedAuthFiles(agentDir, [MULTIPROVIDER_AUTH_FILE])
-              const providerBackfilledNative = changedWatchedAuthFiles(authFilesBefore, authFilesAfter).length > 0
+              const changedAuthFiles = changedWatchedAuthFiles(authFilesBefore, authFilesAfter)
+              const providerBackfilledNative = changedAuthFiles.length > 0
                 || (!upstreamBefore && upstreamAfter)
               const saveAsUpstreamOnly = shouldSaveAsUpstreamOnly({
                 poolExistedBefore,
@@ -1216,6 +1254,10 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               })
               if (saveAsUpstreamOnly) {
                 credential = undefined
+                // Remember this decision in the store: Pi core status cannot
+                // see provider-owned native stores, so without the marker
+                // /accounts and /multilogout would have no trace of it.
+                await store.markUpstreamOnly(provider.id, changedAuthFiles)
                 await reconcile(ctx)
                 ctx.ui.notify(upstreamOnlyNotice(provider.name, label), 'info')
               } else {
@@ -1274,11 +1316,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         // Nothing pooled to remove, but a pending native credential may be
         // why the operator came here — point at its real owner instead of
         // reading as "the account vanished".
-        const pending = pendingUpstreamProviders(
-          uniqueProviders(ctx, baseProviders).map(provider => ({ id: provider.id, label: provider.name })),
-          new Set(),
-          providerId => probeSessionRuntime(ctx)?.getProviderAuthStatus(providerId)?.configured === true,
-        )
+        const pending = await pendingUpstream(ctx, new Set())
         ctx.ui.notify(
           pending.length === 0
             ? 'No multilogin accounts are stored.'
@@ -1329,11 +1367,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       // an upstream-first /multilogin add) would otherwise vanish from this
       // list entirely — show them as pending, mirroring the pool manager.
       const pooledIds = new Set(snapshot.providers.map(provider => provider.id))
-      const pending = pendingUpstreamProviders(
-        uniqueProviders(ctx, baseProviders).map(provider => ({ id: provider.id, label: provider.name })),
-        pooledIds,
-        providerId => runtime?.getProviderAuthStatus(providerId)?.configured === true,
-      )
+      const pending = await pendingUpstream(ctx, pooledIds)
       if (snapshot.providers.length === 0 && pending.length === 0) {
         ctx.ui.notify('No account pools are configured. Use /multilogin to add one.', 'info')
         return

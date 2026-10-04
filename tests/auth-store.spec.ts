@@ -363,3 +363,27 @@ describe('MultiAuthStore virtual providers', () => {
     await expect(new MultiAuthStore(path).listVirtualProviders()).rejects.toThrow('malformed models')
   })
 })
+
+describe('upstream-only markers', () => {
+  it('round-trips markers and retires them when a pool is created', async () => {
+    const { store } = await storeFixture()
+    expect(await store.getUpstreamOnlyMarkers()).toEqual({})
+    await store.markUpstreamOnly('antigravity', ['antigravity-accounts.json'])
+    const markers = await store.getUpstreamOnlyMarkers()
+    expect(Object.keys(markers)).toEqual(['antigravity'])
+    expect(markers['antigravity']?.watchedFiles).toEqual(['antigravity-accounts.json'])
+    // A real pool supersedes the pending hint.
+    await store.addAccount('antigravity', {
+      label: 'bn',
+      credential: { type: 'api_key', key: 'test-secret' },
+    })
+    expect(await store.getUpstreamOnlyMarkers()).toEqual({})
+  })
+
+  it('supports explicit clearing', async () => {
+    const { store } = await storeFixture()
+    await store.markUpstreamOnly('antigravity', [])
+    await store.clearUpstreamOnly('antigravity')
+    expect(await store.getUpstreamOnlyMarkers()).toEqual({})
+  })
+})
