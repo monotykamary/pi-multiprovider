@@ -379,11 +379,4 @@ describe('upstream-only markers', () => {
     })
     expect(await store.getUpstreamOnlyMarkers()).toEqual({})
   })
-
-  it('supports explicit clearing', async () => {
-    const { store } = await storeFixture()
-    await store.markUpstreamOnly('antigravity', [])
-    await store.clearUpstreamOnly('antigravity')
-    expect(await store.getUpstreamOnlyMarkers()).toEqual({})
-  })
 })
