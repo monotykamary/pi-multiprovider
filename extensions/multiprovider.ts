@@ -49,7 +49,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { isUpstreamConfigured, promptApiKeyCredential, probeSessionRuntime, selectLogin, showLoginDialog, upstreamDuplicateNotice } from '../src/multilogin.ts'
+import { isUpstreamConfigured, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, showLoginDialog, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -1172,6 +1172,8 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         } else {
           const method = result.method
           const existing = await store.getPool(provider.id)
+          const poolExistedBefore = existing !== undefined
+          const upstreamBefore = isUpstreamConfigured(ctx, provider.id)
           const defaultLabel = `${provider.name} ${(existing?.accounts.length ?? 0) + 1}`
           const labelInput = await ctx.ui.input('Account label:', defaultLabel)
           if (labelInput !== undefined) {
@@ -1181,32 +1183,43 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               ctx.ui.notify(`Failed to authenticate ${provider.name}: ${login.error.message}`, 'error')
             } else if (login !== undefined) {
               let credential: Credential | undefined = login.credential
-              try {
-                await store.addAccount(provider.id, {
-                  label,
-                  credential,
-                  ...(await store.getPool(provider.id) === undefined
-                    ? {
-                        pool: {
-                          policy: buffer.policy,
-                          affinity: buffer.affinity,
-                          includeUpstream: buffer.includeUpstream,
-                          upstream: buffer.upstream,
-                        },
-                      }
-                    : {}),
-                })
+              if (shouldSaveAsUpstreamOnly({
+                poolExistedBefore,
+                upstreamBefore,
+                method,
+                upstreamAfter: isUpstreamConfigured(ctx, provider.id),
+              })) {
                 credential = undefined
                 await reconcile(ctx)
-                ctx.ui.notify(
-                  method !== 'api_key_paste' && isUpstreamConfigured(ctx, provider.id)
-                    ? upstreamDuplicateNotice(provider.name, label)
-                    : `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
-                  'info',
-                )
-              } catch (error) {
-                credential = undefined
-                ctx.ui.notify(`Could not save account: ${errorText(error)}`, 'error')
+                ctx.ui.notify(upstreamOnlyNotice(provider.name), 'info')
+              } else {
+                try {
+                  await store.addAccount(provider.id, {
+                    label,
+                    credential,
+                    ...(await store.getPool(provider.id) === undefined
+                      ? {
+                          pool: {
+                            policy: buffer.policy,
+                            affinity: buffer.affinity,
+                            includeUpstream: buffer.includeUpstream,
+                            upstream: buffer.upstream,
+                          },
+                        }
+                      : {}),
+                  })
+                  credential = undefined
+                  await reconcile(ctx)
+                  ctx.ui.notify(
+                    method !== 'api_key_paste' && isUpstreamConfigured(ctx, provider.id)
+                      ? upstreamDuplicateNotice(provider.name, label)
+                      : `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
+                    'info',
+                  )
+                } catch (error) {
+                  credential = undefined
+                  ctx.ui.notify(`Could not save account: ${errorText(error)}`, 'error')
+                }
               }
             }
           }
