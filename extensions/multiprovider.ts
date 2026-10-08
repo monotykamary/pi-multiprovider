@@ -1,5 +1,6 @@
 import type { Api, AuthType, Credential, Model, Provider } from '@earendil-works/pi-ai'
 import { normalizeContext } from '@earendil-works/pi-ai'
+import { dirname } from 'node:path'
 import {
   DynamicBorder,
   type ExtensionAPI,
@@ -24,6 +25,7 @@ import {
   getMultiAuthPath,
   type FailoverInfo,
   liftProvider,
+  MULTIPROVIDER_AUTH_FILE,
   MULTIPROVIDER_REGISTER_EVENT,
   MULTIPROVIDER_SERVICE_EVENT,
   MultiAuthStore,
@@ -49,7 +51,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { promptApiKeyCredential, probeSessionRuntime, selectLogin, showLoginDialog } from '../src/multilogin.ts'
+import { attributeChangedFilesToSecrets, attributableSecrets, changedWatchedAuthFiles, isUpstreamConfigured, knownProviderAuthFileName, liveUpstreamConfigured, markerPendingUpstreamIds, pendingUpstreamProviders, pendingUpstreamStatusLines, promptApiKeyCredential, probeSessionRuntime, selectLogin, shouldSaveAsUpstreamOnly, shouldWarnUpstreamDuplicate, showLoginDialog, snapshotWatchedAuthFiles, upstreamDuplicateNotice, upstreamOnlyNotice } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -484,7 +486,10 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot']>>): string[] {
+function statusLines(
+  snapshot: Awaited<ReturnType<MultiProviderService['snapshot']>>,
+  isCoreCredentialMissing: (providerId: string) => boolean = () => false,
+): string[] {
   const lines: string[] = []
   for (const provider of snapshot.providers) {
     lines.push(
@@ -492,6 +497,14 @@ function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot
       + `${provider.firstAccountBias ? ' · main-first' : ''}`
       + ` · affinity ${provider.affinity ? 'on' : 'off'}`,
     )
+    // Pi's /logout only removes the core /login credential, never pooled
+    // accounts, so a pool can outlive its logout. Flag it so the stale entry
+    // is visible instead of looking like an active login. A "fallback" source
+    // means the key is statically embedded by an extension (e.g. pi-cursor-sdk's
+    // non-functional placeholder), not a live login, so it counts as missing.
+    if (isCoreCredentialMissing(provider.id)) {
+      lines.push('  no live core /login credential (pool is separate from /logout; use /multilogout to remove)')
+    }
     if (provider.accounts.length === 0) {
       lines.push('  no accounts')
       continue
@@ -1011,6 +1024,58 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     currentContext = undefined
   })
 
+  /**
+   * Providers with a live native credential but no pool. Combines Pi core
+   * status with multiprovider's own upstream-first markers, which also
+   * cover providers whose native stores Pi core cannot see (e.g.
+   * Antigravity). Used by /accounts, /multilogout, and the pool manager so
+   * every surface agrees on the pending state.
+   */
+  const pendingUpstream = async (
+    ctx: ExtensionContext,
+    pooledIds: ReadonlySet<string>,
+  ): Promise<{ id: string; label: string }[]> => {
+    // Display hint only: every failure mode returns no pending rows rather
+    // than breaking the calling command (this lookup runs in branches that
+    // previously could not fail, e.g. /multilogout with nothing stored).
+    try {
+      return await pendingUpstreamInner(ctx, pooledIds)
+    } catch {
+      return []
+    }
+  }
+
+  const pendingUpstreamInner = async (
+    ctx: ExtensionContext,
+    pooledIds: ReadonlySet<string>,
+  ): Promise<{ id: string; label: string }[]> => {
+    const runtime = probeSessionRuntime(ctx)
+    const all = uniqueProviders(ctx, baseProviders).map(provider => ({ id: provider.id, label: provider.name }))
+    // A throwing status probe must not break the whole list — treat as
+    // unconfigured and let the marker signal speak instead.
+    const coreConfigured = (providerId: string): boolean => {
+      try {
+        return liveUpstreamConfigured(runtime?.getProviderAuthStatus(providerId))
+      } catch {
+        return false
+      }
+    }
+    const ids = new Set(pendingUpstreamProviders(all, pooledIds, coreConfigured)
+      .map(provider => provider.id))
+    const markers = await store.getUpstreamOnlyMarkers()
+    const unpooledMarkers = Object.keys(markers).filter(id => !pooledIds.has(id))
+    if (unpooledMarkers.length > 0) {
+      const present = new Set(Object.keys(
+        await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE]),
+      ))
+      for (const id of markerPendingUpstreamIds(markers, pooledIds, present)) ids.add(id)
+    }
+    const names = new Map(all.map(provider => [provider.id, provider.label]))
+    return [...ids]
+      .map(id => ({ id, label: names.get(id) ?? id }))
+      .sort((left, right) => left.label.localeCompare(right.label))
+  }
+
   pi.registerCommand('multilogin', {
     description: 'Manage a provider pool, Pi default auth, schedulers, and accounts',
     handler: async (args, ctx) => {
@@ -1045,8 +1110,49 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           const scheduler = await store.getSchedulerSettings()
           const runtime = probeSessionRuntime(ctx)
           const upstreamStatus = runtime?.getProviderAuthStatus(provider.id)
-          const upstreamConfigured = upstreamStatus !== undefined && upstreamStatus.configured
-          const upstreamSource = upstreamConfigured ? (upstreamStatus.label ?? upstreamStatus.source) : undefined
+          const statusConfigured = liveUpstreamConfigured(upstreamStatus)
+          const pendingIds = new Set((await pendingUpstream(
+            ctx,
+            pool === undefined ? new Set() : new Set([provider.id]),
+          )).map(entry => entry.id))
+          const upstreamSource = statusConfigured && upstreamStatus !== undefined
+            ? (upstreamStatus.label ?? upstreamStatus.source)
+            : undefined
+          // Legacy pools predate the persisted upstreamConfigured field:
+          // derive it once from live evidence (core status, or the provider's
+          // own native store being present — Pi core is blind to that store,
+          // e.g. antigravity-accounts.json) and persist it so the rotation
+          // and display stop guessing.
+          if (pool !== undefined && pool.upstreamConfigured === undefined) {
+            const knownFile = knownProviderAuthFileName(provider.id)
+            const present = knownFile === undefined ? false
+              : (await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE]))[knownFile] !== undefined
+            const derived = statusConfigured || present
+            await store.setUpstreamConfigured(provider.id, derived)
+            pool.upstreamConfigured = derived
+          }
+          // A live core credential observed while the pool says no-upstream
+          // is newer evidence: upgrade the record so display and rotation
+          // agree.
+          if (pool !== undefined && pool.upstreamConfigured === false && statusConfigured) {
+            await store.setUpstreamConfigured(provider.id, true)
+            pool.upstreamConfigured = true
+          }
+          // Records written before the pool's own auth source was excluded
+          // from upstream evidence say true on circular grounds only (Pi
+          // core saw the pool serving itself). When core answers and reports
+          // no live credential — and the provider has no known native store
+          // to re-verify — the recorded upstream has no remaining evidence:
+          // downgrade so display and rotation stop showing a phantom row.
+          if (pool !== undefined && pool.upstreamConfigured === true
+            && !statusConfigured && upstreamStatus !== undefined
+            && knownProviderAuthFileName(provider.id) === undefined) {
+            await store.setUpstreamConfigured(provider.id, false)
+            pool.upstreamConfigured = false
+          }
+          const upstreamConfigured = statusConfigured
+            || pendingIds.has(provider.id)
+            || (pool?.upstreamConfigured === true)
           const upstreamState = {
             ...(upstreamConfigured ? { upstreamConfigured } : {}),
             ...(upstreamSource === undefined ? {} : { upstreamSource }),
@@ -1138,18 +1244,46 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
           if (account === undefined) {
             ctx.ui.notify('That account is no longer stored.', 'warning')
           } else {
+            const reauthWatchBefore = result.method === 'api_key_paste'
+              ? undefined
+              : await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE])
             const login = await runLogin(result.method, `Reauthenticate ${account.label}`)
             if (login !== undefined && 'error' in login) {
               ctx.ui.notify(`Failed to reauthenticate ${account.label}: ${login.error.message}`, 'error')
             } else if (login !== undefined) {
               let credential: Credential | undefined = login.credential
+              const reauthChanged = reauthWatchBefore === undefined
+                ? []
+                : changedWatchedAuthFiles(
+                    reauthWatchBefore,
+                    await snapshotWatchedAuthFiles(dirname(getMultiAuthPath()), [MULTIPROVIDER_AUTH_FILE]),
+                  )
+              // Attribute the rewrite to this login when possible: with
+              // secrets to check, only files containing one count, so a
+              // concurrent unrelated rewrite no longer counts. Attribution
+              // is impossible without secrets (or when the store cannot be
+              // read); only then keep the raw change heuristic.
+              const reauthSecrets = credential === undefined ? [] : attributableSecrets(credential)
+              const reauthAttributed = reauthSecrets.length === 0
+                ? reauthChanged
+                : await attributeChangedFilesToSecrets(
+                    dirname(getMultiAuthPath()),
+                    reauthChanged,
+                    reauthSecrets,
+                  )
+              const reauthBackfilledNative = reauthAttributed.length > 0
               try {
                 await store.replaceAccountCredential(provider.id, account.id, credential)
                 credential = undefined
                 if (service.hasProvider(provider.id)) service.resetHealth(provider.id, account.id)
                 await reconcile(ctx)
                 ctx.ui.notify(
-                  `Reauthenticated ${account.label} for ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
+                  `Reauthenticated ${account.label} for ${provider.name}. Credentials saved to ${getMultiAuthPath()}${shouldWarnUpstreamDuplicate({
+                    savedAsUpstreamOnly: false,
+                    method: result.method,
+                    providerBackfilledNative: reauthBackfilledNative,
+                    upstreamConfiguredAfter: isUpstreamConfigured(ctx, provider.id),
+                  }) ? ' This login may also have updated the native Pi credential, in which case the pool\'s upstream row and the pooled account are the same account counted twice — disable upstream in /multilogin if so.' : ''}`,
                   'info',
                 )
               } catch (error) {
@@ -1161,6 +1295,14 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         } else {
           const method = result.method
           const existing = await store.getPool(provider.id)
+          const poolExistedBefore = existing !== undefined
+          const upstreamBefore = isUpstreamConfigured(ctx, provider.id)
+          // Pi core status cannot see provider-owned native stores (verified:
+          // an Antigravity login rewrote antigravity-accounts.json while
+          // status still reported unconfigured), so also watch the agent
+          // dir for native-store writes across the login.
+          const agentDir = dirname(getMultiAuthPath())
+          const authFilesBefore = await snapshotWatchedAuthFiles(agentDir, [MULTIPROVIDER_AUTH_FILE])
           const defaultLabel = `${provider.name} ${(existing?.accounts.length ?? 0) + 1}`
           const labelInput = await ctx.ui.input('Account label:', defaultLabel)
           if (labelInput !== undefined) {
@@ -1170,30 +1312,81 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
               ctx.ui.notify(`Failed to authenticate ${provider.name}: ${login.error.message}`, 'error')
             } else if (login !== undefined) {
               let credential: Credential | undefined = login.credential
-              try {
-                await store.addAccount(provider.id, {
-                  label,
-                  credential,
-                  ...(await store.getPool(provider.id) === undefined
-                    ? {
-                        pool: {
-                          policy: buffer.policy,
-                          affinity: buffer.affinity,
-                          includeUpstream: buffer.includeUpstream,
-                          upstream: buffer.upstream,
-                        },
-                      }
-                    : {}),
-                })
+              const upstreamAfter = isUpstreamConfigured(ctx, provider.id)
+              // One upstream-existence signal for both the upstream-first gate
+              // and the pool's upstreamConfigured record (core status is blind
+              // to provider-owned native stores; the marker is its only trace).
+              const upstreamExisted = upstreamBefore
+                || (await store.getUpstreamOnlyMarkers())[provider.id] !== undefined
+              const authFilesAfter = await snapshotWatchedAuthFiles(agentDir, [MULTIPROVIDER_AUTH_FILE])
+              const changedAuthFiles = changedWatchedAuthFiles(authFilesBefore, authFilesAfter)
+              // Attribute the rewrite to this login when possible: with
+              // secrets to check, only files containing one count, so a
+              // concurrent unrelated rewrite no longer counts. Attribution
+              // is impossible without secrets (or when the store cannot be
+              // read); only then keep the raw change heuristic.
+              const addSecrets = credential === undefined ? [] : attributableSecrets(credential)
+              const attributedAuthFiles = addSecrets.length === 0
+                ? changedAuthFiles
+                : await attributeChangedFilesToSecrets(agentDir, changedAuthFiles, addSecrets)
+              const providerBackfilledNative = attributedAuthFiles.length > 0
+                || (!upstreamBefore && upstreamAfter)
+              const saveAsUpstreamOnly = shouldSaveAsUpstreamOnly({
+                poolExistedBefore,
+                method,
+                providerBackfilledNative,
+                upstreamExisted,
+              })
+              if (saveAsUpstreamOnly) {
                 credential = undefined
+                // Remember this decision in the store: Pi core status cannot
+                // see provider-owned native stores, so without the marker
+                // /accounts and /multilogout would have no trace of it.
+                // Status-flip-only backfills (no file changed) need no
+                // marker: core status already sees those at display time.
+                if (attributedAuthFiles.length > 0) await store.markUpstreamOnly(provider.id, attributedAuthFiles)
                 await reconcile(ctx)
-                ctx.ui.notify(
-                  `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
-                  'info',
-                )
-              } catch (error) {
-                credential = undefined
-                ctx.ui.notify(`Could not save account: ${errorText(error)}`, 'error')
+                // warning, not info: info notifies render as a dim status
+                // line that later notifies overwrite in place, and this
+                // notice is the only trace of a discarded typed label.
+                ctx.ui.notify(upstreamOnlyNotice(provider.name, label), 'warning')
+              } else {
+                try {
+                  await store.addAccount(provider.id, {
+                    label,
+                    credential,
+                    ...(await store.getPool(provider.id) === undefined
+                      ? {
+                          upstreamConfigured: upstreamExisted,
+                          pool: {
+                            policy: buffer.policy,
+                            affinity: buffer.affinity,
+                            includeUpstream: buffer.includeUpstream,
+                            upstream: buffer.upstream,
+                          },
+                        }
+                      : {}),
+                  })
+                  credential = undefined
+                  await reconcile(ctx)
+                  const duplicateWarning = shouldWarnUpstreamDuplicate({
+                    savedAsUpstreamOnly: false,
+                    method,
+                    providerBackfilledNative,
+                    upstreamConfiguredAfter: upstreamAfter,
+                  })
+                  ctx.ui.notify(
+                    duplicateWarning
+                      ? upstreamDuplicateNotice(provider.name, label)
+                      : `Added ${label} to ${provider.name}. Credentials saved to ${getMultiAuthPath()}`,
+                    // Duplication warning must be visible; plain success can
+                    // stay a transient status line (the manager also opens).
+                    duplicateWarning ? 'warning' : 'info',
+                  )
+                } catch (error) {
+                  credential = undefined
+                  ctx.ui.notify(`Could not save account: ${errorText(error)}`, 'error')
+                }
               }
             }
           }
@@ -1210,11 +1403,35 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         ctx.ui.notify('/multilogout requires Pi interactive mode.', 'warning')
         return
       }
+      // A UI command must never die silently: surface failures as an error
+      // notice so a backend problem (store lock, unreadable state) is
+      // diagnosable instead of looking like an empty command.
+      try {
+        await multilogout(ctx, args)
+      } catch (error) {
+        ctx.ui.notify(`/multilogout failed: ${errorText(error)}`, 'error')
+      }
+    },
+  })
+
+  const multilogout = async (ctx: ExtensionContext, args: string): Promise<void> => {
       const pools = (await Promise.all(
         (await store.listProviderIds()).map(providerId => store.getPool(providerId)),
       )).filter(pool => pool !== undefined)
       if (pools.length === 0) {
-        ctx.ui.notify('No multilogin accounts are stored.', 'info')
+        // Nothing pooled to remove, but a pending native credential may be
+        // why the operator came here — point at its real owner instead of
+        // reading as "the account vanished".
+        const pending = await pendingUpstream(ctx, new Set())
+        // warning, not info: Pi renders info notifies as a dim status line
+        // that later notifies overwrite in place — the user reads that as
+        // the command doing nothing. A warning appends a visible chat line.
+        ctx.ui.notify(
+          pending.length === 0
+            ? 'No multilogin accounts are stored.'
+            : `No multilogin accounts are stored. Native upstream credentials (${pending.map(provider => provider.label).join(', ')}) are separate — manage them via /login or the provider's own accounts command.`,
+          'warning',
+        )
         return
       }
       const ref = args.trim().toLowerCase()
@@ -1246,19 +1463,32 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       await store.removeAccount(pool.providerId, account.id)
       await reconcile(ctx)
       ctx.ui.notify(`Removed ${account.label} from ${pool.providerId}.`, 'info')
-    },
-  })
+  }
 
   pi.registerCommand('accounts', {
     description: 'Show multiprovider account pools and health',
     handler: async (_args, ctx) => {
       await reconcile(ctx)
       const snapshot = await service.snapshot()
-      if (snapshot.providers.length === 0) {
-        ctx.ui.notify('No account pools are configured. Use /multilogin to add one.', 'info')
+      const runtime = probeSessionRuntime(ctx)
+      // Providers with a live native credential but no pool yet (e.g. after
+      // an upstream-first /multilogin add) would otherwise vanish from this
+      // list entirely — show them as pending, mirroring the pool manager.
+      const pooledIds = new Set(snapshot.providers.map(provider => provider.id))
+      const pending = await pendingUpstream(ctx, pooledIds)
+      if (snapshot.providers.length === 0 && pending.length === 0) {
+        // warning, not info: info notifies render as a dim status line that
+        // later notifies overwrite in place — see /multilogout above.
+        ctx.ui.notify('No account pools are configured. Use /multilogin to add one.', 'warning')
         return
       }
-      await ctx.ui.select('Provider Accounts', statusLines(snapshot))
+      await ctx.ui.select('Provider Accounts', [
+        ...statusLines(snapshot, providerId => {
+          const status = runtime?.getProviderAuthStatus(providerId)
+          return status?.configured === false || status?.source === 'fallback'
+        }),
+        ...pendingUpstreamStatusLines(pending),
+      ])
     },
   })
 

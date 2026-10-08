@@ -12,10 +12,10 @@ import { MultiAuthStore, type VirtualModelTemplate } from '../src/index.ts'
 
 const temporaryDirectories: string[] = []
 
-async function storeFixture(): Promise<{ directory: string; store: MultiAuthStore }> {
+async function storeFixture(): Promise<{ directory: string; path: string; store: MultiAuthStore }> {
   const directory = await mkdtemp(join(tmpdir(), 'pi-multiprovider-auth-'))
   temporaryDirectories.push(directory)
-  return { directory, store: new MultiAuthStore(join(directory, 'multiprovider-auth.json')) }
+  return { directory, path: join(directory, 'multiprovider-auth.json'), store: new MultiAuthStore(join(directory, 'multiprovider-auth.json')) }
 }
 
 const model: Model<'test-api'> = {
@@ -361,5 +361,66 @@ describe('MultiAuthStore virtual providers', () => {
       virtuals: { pooled: { id: 'pooled', label: 'Pooled', models: 'nope' } },
     }))
     await expect(new MultiAuthStore(path).listVirtualProviders()).rejects.toThrow('malformed models')
+  })
+})
+
+describe('upstream-only markers', () => {
+  it('round-trips markers and retires them when a pool is created', async () => {
+    const { store } = await storeFixture()
+    expect(await store.getUpstreamOnlyMarkers()).toEqual({})
+    await store.markUpstreamOnly('antigravity', ['antigravity-accounts.json'])
+    const markers = await store.getUpstreamOnlyMarkers()
+    expect(Object.keys(markers)).toEqual(['antigravity'])
+    expect(markers['antigravity']?.watchedFiles).toEqual(['antigravity-accounts.json'])
+    // A real pool supersedes the pending hint.
+    await store.addAccount('antigravity', {
+      label: 'bn',
+      credential: { type: 'api_key', key: 'test-secret' },
+    })
+    expect(await store.getUpstreamOnlyMarkers()).toEqual({})
+  })
+})
+
+describe('pool upstreamConfigured record', () => {
+  it('persists the seed value when the first account creates the pool', async () => {
+    const { store } = await storeFixture()
+    await store.addAccount('antigravity', {
+      label: 'bn',
+      credential: { type: 'api_key', key: 'test-secret' },
+      upstreamConfigured: true,
+    })
+    expect((await store.getPool('antigravity'))?.upstreamConfigured).toBe(true)
+    await store.addAccount('cursor', {
+      label: 'house',
+      credential: { type: 'api_key', key: 'test-secret' },
+      upstreamConfigured: false,
+    })
+    expect((await store.getPool('cursor'))?.upstreamConfigured).toBe(false)
+  })
+
+  it('round-trips setUpstreamConfigured and rejects pools that do not exist', async () => {
+    const { store } = await storeFixture()
+    await expect(store.setUpstreamConfigured('antigravity', true)).rejects.toThrow(/no pool/)
+    await store.addAccount('antigravity', {
+      label: 'bn',
+      credential: { type: 'api_key', key: 'test-secret' },
+    })
+    expect((await store.getPool('antigravity'))?.upstreamConfigured).toBeUndefined()
+    await store.setUpstreamConfigured('antigravity', true)
+    expect((await store.getPool('antigravity'))?.upstreamConfigured).toBe(true)
+    await store.setUpstreamConfigured('antigravity', false)
+    expect((await store.getPool('antigravity'))?.upstreamConfigured).toBe(false)
+  })
+
+  it('rejects a non-boolean upstreamConfigured on load', async () => {
+    const { store, path } = await storeFixture()
+    await store.addAccount('antigravity', {
+      label: 'bn',
+      credential: { type: 'api_key', key: 'test-secret' },
+    })
+    const raw = JSON.parse(await readFile(path, 'utf8'))
+    raw.providers.antigravity.upstreamConfigured = 'yes'
+    await writeFile(path, JSON.stringify(raw), { mode: 0o600 })
+    await expect(store.getPool('antigravity')).rejects.toThrow(/malformed upstreamConfigured/)
   })
 })

@@ -10,6 +10,7 @@ import type {
   StreamOptions,
 } from '@earendil-works/pi-ai'
 import { MultiAuthStore } from './auth-store.ts'
+import { MULTIPOOL_AUTH_SOURCE } from './multilogin.ts'
 import type {
   AccountAttemptContext,
   AccountRequestContext,
@@ -136,7 +137,7 @@ export function mergeProviderAuth(
         }
       }
       return await hasStoredAccounts()
-        ? { type: 'api_key', source: 'multiprovider account pool' }
+        ? { type: 'api_key', source: MULTIPOOL_AUTH_SOURCE }
         : undefined
     },
     async resolve(input) {
@@ -149,7 +150,7 @@ export function mergeProviderAuth(
         }
       }
       return await hasStoredAccounts()
-        ? markAuthResult({ auth: {}, source: 'multiprovider account pool' }, false)
+        ? markAuthResult({ auth: {}, source: MULTIPOOL_AUTH_SOURCE }, false)
         : undefined
     },
   }
@@ -201,7 +202,12 @@ export function createManagedIntegration<TApi extends Api>(
     const pool = await store.getPool(provider.id)
     if (pool === undefined) return []
     const result: ProviderAccount<string>[] = []
-    if (pool.includeUpstream) {
+    // upstreamConfigured === false means no live upstream credential was
+    // observed when the pool was created (e.g. only a fallback-embedded
+    // placeholder key): don't offer a phantom upstream slot that resolves to
+    // a credential the provider never logged in. Absent field = legacy pool,
+    // keep including it until the manager derives and persists the value.
+    if (pool.includeUpstream && pool.upstreamConfigured !== false) {
       result.push({
         id: PI_UPSTREAM_ACCOUNT_ID,
         label: pool.upstream?.label ?? 'Pi default',

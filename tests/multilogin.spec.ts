@@ -1,3 +1,6 @@
+import { mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   createProvider,
   type AuthEvent,
@@ -12,9 +15,26 @@ import {
 import type { TUI } from '@earendil-works/pi-tui'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  attributableSecrets,
+  attributeChangedFilesToSecrets,
+  changedWatchedAuthFiles,
+  isUpstreamConfigured,
+  isWatchedAuthFileName,
+  knownProviderAuthFileName,
+  liveUpstreamConfigured,
+  MULTIPOOL_AUTH_SOURCE,
   LoginDialogHostComponent,
   loginCredential,
+  markerPendingUpstreamIds,
+  pendingUpstreamProviders,
+  pendingUpstreamStatusLines,
+  shouldSaveAsUpstreamOnly,
+  shouldWarnUpstreamDuplicate,
   showLoginDialog,
+  snapshotWatchedAuthFiles,
+  upstreamAuthSource,
+  upstreamDuplicateNotice,
+  upstreamOnlyNotice,
 } from '../src/multilogin.ts'
 
 const model: Model<'test-api'> = {
@@ -237,5 +257,331 @@ describe('/multilogin provider auth', () => {
 
     const result = await dialogPromise
     expect(result).toBeUndefined()
+  })
+})
+
+describe('upstream duplicate notice', () => {
+  function ctxWithUpstream(configured: boolean): ExtensionContext {
+    return {
+      modelRegistry: {
+        runtime: {
+          getProviders: () => [],
+          getProviderAuthStatus: () => ({ configured, source: 'stored' }),
+          isUsingOAuth: () => true,
+        },
+      },
+    } as unknown as ExtensionContext
+  }
+
+  it('reports upstream as configured only when the runtime says so', () => {
+    expect(isUpstreamConfigured(ctxWithUpstream(true), 'antigravity')).toBe(true)
+    expect(isUpstreamConfigured(ctxWithUpstream(false), 'antigravity')).toBe(false)
+  })
+
+  it('treats a fallback-embedded key as not configured (placeholder, not a live login)', () => {
+    expect(liveUpstreamConfigured({ configured: true, source: 'fallback' })).toBe(false)
+    expect(liveUpstreamConfigured({ configured: true, source: 'login' })).toBe(true)
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment' })).toBe(true)
+    expect(liveUpstreamConfigured(undefined)).toBe(false)
+  })
+
+  it('judges the auth-check wrap by the demoted label, not the generic source', () => {
+    // Pi core getProviderAuthStatus wraps an auth-check result as
+    // {configured: true, source: 'environment', label: check.source} — the
+    // check's own source is demoted into the label. Both of these are the
+    // cursor placeholder surfacing through that wrap.
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment', label: 'fallback' })).toBe(false)
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment', label: 'configured API key' })).toBe(false)
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment', label: MULTIPOOL_AUTH_SOURCE })).toBe(false)
+    // Genuinely live credentials still pass: a real oauth check result, and
+    // the env-var form (label names the env vars, checked earlier in core).
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment', label: 'OAuth' })).toBe(true)
+    expect(liveUpstreamConfigured({ configured: true, source: 'environment', label: 'CURSOR_API_KEY' })).toBe(true)
+  })
+
+  it('resolves the effective auth source from the label when core demotes it', () => {
+    expect(upstreamAuthSource({ source: 'environment', label: 'fallback' })).toBe('fallback')
+    expect(upstreamAuthSource({ source: 'stored' })).toBe('stored')
+    expect(upstreamAuthSource({ source: 'environment' })).toBe('environment')
+    expect(upstreamAuthSource(undefined)).toBeUndefined()
+  })
+
+  it('does not count the pool serving itself as upstream evidence (circular status)', () => {
+    expect(liveUpstreamConfigured({ configured: true, source: MULTIPOOL_AUTH_SOURCE })).toBe(false)
+  })
+
+  it('maps provider-owned native stores to their provider for legacy upstream recovery', () => {
+    expect(knownProviderAuthFileName('antigravity')).toBe('antigravity-accounts.json')
+    expect(knownProviderAuthFileName('cursor')).toBeUndefined()
+  })
+
+  it('reports unconfigured when there is no session runtime', () => {
+    const ctx = { modelRegistry: {} } as unknown as ExtensionContext
+    expect(isUpstreamConfigured(ctx, 'antigravity')).toBe(false)
+  })
+
+  it('reports unconfigured when the runtime probe throws', () => {
+    const ctx = {
+      modelRegistry: {
+        runtime: {
+          getProviders: () => [],
+          getProviderAuthStatus: () => { throw new Error('unavailable') },
+          isUsingOAuth: () => true,
+        },
+      },
+    } as unknown as ExtensionContext
+    expect(isUpstreamConfigured(ctx, 'antigravity')).toBe(false)
+  })
+
+  it('notice names the pool rows and points at the upstream toggle', () => {
+    const message = upstreamDuplicateNotice('Antigravity', 'bn')
+    expect(message).toContain('bn')
+    expect(message).toContain('Antigravity')
+    expect(message).toContain('upstream')
+    expect(message).toContain('/multilogin')
+  })
+})
+
+describe('upstream-first first add', () => {
+  it('saves as upstream only for a new pool whose login backfilled native state', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      method: 'oauth',
+      providerBackfilledNative: true,
+    })).toBe(true)
+  })
+
+  it('pools normally when the pool already existed', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: true,
+      method: 'oauth',
+      providerBackfilledNative: true,
+    })).toBe(false)
+  })
+
+  it('pools normally when an upstream credential already existed before the add', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      method: 'oauth',
+      providerBackfilledNative: true,
+      upstreamExisted: true,
+    })).toBe(false)
+  })
+
+  it('pools normally when the pending upstream marker already exists (second add starts the pool)', () => {
+    // Pi core cannot see provider-owned native stores, so for e.g.
+    // Antigravity the upstreamExistedBefore signal is the store marker, not
+    // core status. Without this, a natively-backfilling provider would
+    // swallow every add and the pool could never start.
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      method: 'oauth',
+      providerBackfilledNative: true,
+      upstreamExisted: true,
+    })).toBe(false)
+  })
+
+  it('pools normally when the login left native state untouched (pure login)', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      method: 'oauth',
+      providerBackfilledNative: false,
+    })).toBe(false)
+  })
+
+  it('pools normally for the paste-API-key flow, which never touches upstream', () => {
+    expect(shouldSaveAsUpstreamOnly({
+      poolExistedBefore: false,
+      method: 'api_key_paste',
+      providerBackfilledNative: true,
+    })).toBe(false)
+  })
+
+  it('upstream-only notice names the provider and the next step', () => {
+    const message = upstreamOnlyNotice('Antigravity')
+    expect(message).toContain('Antigravity')
+    expect(message).toContain('upstream')
+    expect(message).toContain('/multilogin')
+  })
+
+  it('upstream-only notice names the discarded label when one was typed', () => {
+    const message = upstreamOnlyNotice('Antigravity', 'bn')
+    expect(message).toContain('"bn"')
+    expect(message).toContain('not kept')
+  })
+})
+
+describe('pending upstream providers', () => {
+  const all = [
+    { id: 'antigravity', label: 'Antigravity' },
+    { id: 'openai', label: 'OpenAI' },
+    { id: 'cursor', label: 'Cursor' },
+  ]
+
+  it('lists configured providers that have no pool', () => {
+    const pending = pendingUpstreamProviders(
+      all,
+      new Set(['openai']),
+      id => id !== 'cursor',
+    )
+    expect(pending).toEqual([{ id: 'antigravity', label: 'Antigravity' }])
+  })
+
+  it('is empty when every configured provider already has a pool', () => {
+    expect(pendingUpstreamProviders(
+      all,
+      new Set(['antigravity', 'openai', 'cursor']),
+      () => true,
+    )).toEqual([])
+  })
+
+  it('renders pending rows without claiming an account identity', () => {
+    const lines = pendingUpstreamStatusLines([{ id: 'antigravity', label: 'Antigravity' }])
+    expect(lines).toEqual([
+      'Antigravity (antigravity) · no pool yet',
+      '  Pi default (upstream) · native credential, not pooled · next /multilogin add starts the pool',
+    ])
+  })
+})
+
+describe('upstream-only markers', () => {
+  const markers = {
+    antigravity: { addedAt: '2026-10-04T00:00:00.000Z', watchedFiles: ['antigravity-accounts.json'] },
+    openai: { addedAt: '2026-10-04T00:00:00.000Z', watchedFiles: ['auth.json'] },
+  }
+
+  it('keeps markers whose recorded native file is still present and unpooled', () => {
+    expect(markerPendingUpstreamIds(
+      markers,
+      new Set(),
+      new Set(['antigravity-accounts.json', 'models-store.json']),
+    )).toEqual(['antigravity'])
+  })
+
+  it('retires markers once a pool exists or the native file is gone', () => {
+    expect(markerPendingUpstreamIds(markers, new Set(['antigravity']), new Set(['antigravity-accounts.json'])))
+      .toEqual([])
+    expect(markerPendingUpstreamIds(markers, new Set(), new Set(['models-store.json']))).toEqual([])
+  })
+})
+
+describe('upstream duplicate warning', () => {
+  it('warns when the login backfilled native state', () => {
+    expect(shouldWarnUpstreamDuplicate({
+      savedAsUpstreamOnly: false,
+      method: 'oauth',
+      providerBackfilledNative: true,
+      upstreamConfiguredAfter: false,
+    })).toBe(true)
+  })
+
+  it('warns when upstream is configured afterwards (standard providers)', () => {
+    expect(shouldWarnUpstreamDuplicate({
+      savedAsUpstreamOnly: false,
+      method: 'oauth',
+      providerBackfilledNative: false,
+      upstreamConfiguredAfter: true,
+    })).toBe(true)
+  })
+
+  it('stays quiet for pure logins with no native trace', () => {
+    expect(shouldWarnUpstreamDuplicate({
+      savedAsUpstreamOnly: false,
+      method: 'oauth',
+      providerBackfilledNative: false,
+      upstreamConfiguredAfter: false,
+    })).toBe(false)
+  })
+
+  it('stays quiet on the upstream-first path and for pasted keys', () => {
+    expect(shouldWarnUpstreamDuplicate({
+      savedAsUpstreamOnly: true,
+      method: 'oauth',
+      providerBackfilledNative: true,
+      upstreamConfiguredAfter: false,
+    })).toBe(false)
+    expect(shouldWarnUpstreamDuplicate({
+      savedAsUpstreamOnly: false,
+      method: 'api_key_paste',
+      providerBackfilledNative: true,
+      upstreamConfiguredAfter: true,
+    })).toBe(false)
+  })
+})
+
+describe('watched auth files', () => {
+  it('matches auth-ish file names and skips the pool store, locks, and temp files', () => {
+    expect(isWatchedAuthFileName('auth.json')).toBe(true)
+    expect(isWatchedAuthFileName('antigravity-accounts.json')).toBe(true)
+    expect(isWatchedAuthFileName('cursor-credentials.json')).toBe(true)
+    expect(isWatchedAuthFileName('models-store.json')).toBe(false)
+    expect(isWatchedAuthFileName('multiprovider-auth.json', ['multiprovider-auth.json'])).toBe(false)
+    expect(isWatchedAuthFileName('auth.json.lock')).toBe(false)
+    expect(isWatchedAuthFileName('.multiprovider-auth.json.123.abc.tmp')).toBe(false)
+  })
+
+  it('detects a native store created or rewritten with different content', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'multiprovider-watch-'))
+    try {
+      const before = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
+      expect(changedWatchedAuthFiles(before, before)).toEqual([])
+      await writeFile(join(dir, 'antigravity-accounts.json'), '{"accounts":{}}')
+      await writeFile(join(dir, 'models-store.json'), '{}')
+      const afterCreate = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
+      expect(changedWatchedAuthFiles(before, afterCreate)).toEqual(['antigravity-accounts.json'])
+      await writeFile(join(dir, 'antigravity-accounts.json'), '{"accounts":{"a":1}}')
+      const afterRewrite = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
+      expect(changedWatchedAuthFiles(afterCreate, afterRewrite)).toEqual(['antigravity-accounts.json'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('ignores same-content rewrites that only touch metadata', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'multiprovider-watch-'))
+    try {
+      await writeFile(join(dir, 'antigravity-accounts.json'), '{"accounts":{}}')
+      const before = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
+      const past = new Date(Date.now() - 60_000)
+      await utimes(join(dir, 'antigravity-accounts.json'), past, past)
+      const after = await snapshotWatchedAuthFiles(dir, ['multiprovider-auth.json'])
+      expect(changedWatchedAuthFiles(before, after)).toEqual([])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('falls back to metadata when content hashes are unavailable', () => {
+    const before = { 'auth.json': { mtimeMs: 1, size: 10 } }
+    expect(changedWatchedAuthFiles(before, { 'auth.json': { mtimeMs: 2, size: 10 } })).toEqual(['auth.json'])
+    expect(changedWatchedAuthFiles(before, { 'auth.json': { mtimeMs: 1, size: 10 } })).toEqual([])
+  })
+
+  it('extracts attributable secrets from fresh credentials', () => {
+    expect(attributableSecrets({ type: 'oauth', refresh: 'r', access: 'a', expires: 1 })).toEqual(['r', 'a'])
+    expect(attributableSecrets({ type: 'oauth', refresh: '', access: '', expires: 1 })).toEqual([])
+    expect(attributableSecrets({ type: 'api_key', key: 'k' })).toEqual(['k'])
+    expect(attributableSecrets({ type: 'api_key' })).toEqual([])
+  })
+
+  it('attributes only changed files containing a fresh secret', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'multiprovider-attribute-'))
+    try {
+      await writeFile(join(dir, 'native-accounts.json'), JSON.stringify({ refresh: 'fresh-refresh-token' }))
+      await writeFile(join(dir, 'other-auth.json'), JSON.stringify({ refresh: 'someone-elses-token' }))
+      expect(await attributeChangedFilesToSecrets(
+        dir,
+        ['native-accounts.json', 'other-auth.json', 'gone-auth.json'],
+        ['fresh-refresh-token'],
+      )).toEqual(['native-accounts.json'])
+      expect(await attributeChangedFilesToSecrets(dir, ['native-accounts.json'], [])).toEqual([])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('returns an empty snapshot for a missing directory', async () => {
+    const snapshot = await snapshotWatchedAuthFiles(join(tmpdir(), 'multiprovider-watch-missing-dir'))
+    expect(snapshot).toEqual({})
   })
 })

@@ -47,6 +47,13 @@ export interface MultiAuthPool {
   policy: SelectionPolicy
   affinity: boolean
   includeUpstream: boolean
+  /**
+   * Whether an upstream credential was observed to exist when the pool was
+   * created (core status or an upstream-first marker). Absent on pools
+   * created before this field existed; the manager derives it once from
+   * live evidence and persists it.
+   */
+  upstreamConfigured?: boolean
   upstream?: MultiAuthUpstreamPreferences
   accounts: MultiAuthAccount[]
 }
@@ -57,6 +64,8 @@ export interface AddMultiAuthAccount {
   enabled?: boolean
   weight?: number
   priority?: number
+  /** Applied only when this call creates the pool (see MultiAuthPool.upstreamConfigured). */
+  upstreamConfigured?: boolean
   pool?: MultiAuthPoolSettings
 }
 
@@ -82,6 +91,7 @@ interface PersistedPool {
   policy: SelectionPolicy
   affinity: boolean
   includeUpstream: boolean
+  upstreamConfigured?: boolean
   upstream?: MultiAuthUpstreamPreferences
   accounts: PersistedAccount[]
 }
@@ -91,6 +101,20 @@ interface PersistedState {
   scheduler?: SchedulerSettings
   providers: Record<string, PersistedPool>
   virtuals?: Record<string, VirtualProviderConfig>
+  /**
+   * Providers whose last /multilogin add was kept as the native upstream
+   * credential instead of a pooled copy (upstream-first path). Records the
+   * native files observed changing across that login so display surfaces
+   * can keep showing the pending state even when Pi core status cannot see
+   * the provider-owned store. Cleared when a pool is created for the
+   * provider; a recorded file disappearing also retires the marker.
+   */
+  upstreamOnly?: Record<string, UpstreamOnlyMarker>
+}
+
+export interface UpstreamOnlyMarker {
+  addedAt: string
+  watchedFiles: string[]
 }
 
 const DEFAULT_POLICY: SelectionPolicy = 'round-robin'
@@ -289,6 +313,9 @@ function parseState(text: string): PersistedState {
       throw new Error(`multiprovider: malformed accounts for "${providerId}"`)
     }
     if (pool.upstream !== undefined) assertUpstreamPreferences(pool.upstream)
+    if (pool.upstreamConfigured !== undefined && typeof pool.upstreamConfigured !== 'boolean') {
+      throw new Error(`multiprovider: malformed upstreamConfigured for "${providerId}"`)
+    }
     for (const accountValue of pool.accounts) {
       if (typeof accountValue !== 'object' || accountValue === null) {
         throw new Error(`multiprovider: malformed account for "${providerId}"`)
@@ -306,6 +333,19 @@ function parseState(text: string): PersistedState {
       normalizeVirtualProvider(virtualValue)
     }
   }
+  if (candidate.upstreamOnly !== undefined) {
+    if (typeof candidate.upstreamOnly !== 'object' || candidate.upstreamOnly === null) {
+      throw new Error('multiprovider: malformed upstream-only markers')
+    }
+    for (const [providerId, markerValue] of Object.entries(candidate.upstreamOnly)) {
+      assertSafeKey(providerId, 'provider id')
+      const marker = markerValue as Partial<UpstreamOnlyMarker>
+      if (typeof marker.addedAt !== 'string' || !Array.isArray(marker.watchedFiles)
+        || !marker.watchedFiles.every(file => typeof file === 'string')) {
+        throw new Error(`multiprovider: malformed upstream-only marker for "${providerId}"`)
+      }
+    }
+  }
   return candidate as PersistedState
 }
 
@@ -320,6 +360,7 @@ function publicPool(providerId: string, pool: PersistedPool): MultiAuthPool {
     policy: pool.policy,
     affinity: pool.affinity,
     includeUpstream: pool.includeUpstream,
+    ...(pool.upstreamConfigured === undefined ? {} : { upstreamConfigured: pool.upstreamConfigured }),
     ...(pool.upstream === undefined ? {} : { upstream: { ...pool.upstream } }),
     accounts: pool.accounts.map(publicAccount),
   }
@@ -418,12 +459,31 @@ export class MultiAuthStore {
     return (await this.getPool(providerId))?.accounts.some(account => account.enabled) ?? false
   }
 
+  async getUpstreamOnlyMarkers(): Promise<Record<string, UpstreamOnlyMarker>> {
+    return { ...((await this.readState()).upstreamOnly ?? {}) }
+  }
+
+  async markUpstreamOnly(providerId: string, watchedFiles: readonly string[]): Promise<void> {
+    assertSafeKey(providerId, 'provider id')
+    await this.mutate(state => {
+      state.upstreamOnly ??= {}
+      state.upstreamOnly[providerId] = {
+        addedAt: new Date().toISOString(),
+        watchedFiles: [...watchedFiles],
+      }
+    })
+  }
+
   async addAccount(providerId: string, input: AddMultiAuthAccount): Promise<MultiAuthAccount> {
     assertSafeKey(providerId, 'provider id')
     const label = input.label.trim()
     if (label === '') throw new Error('multiprovider: account label is required')
     assertCredential(input.credential)
     return this.mutate(state => {
+      const isNewPool = state.providers[providerId] === undefined
+      // A real pool supersedes the upstream-first marker: the provider is
+      // now represented explicitly, so the pending hint must retire.
+      if (isNewPool && state.upstreamOnly !== undefined) delete state.upstreamOnly[providerId]
       const pool = state.providers[providerId] ?? {
         policy: DEFAULT_POLICY,
         affinity: true,
@@ -431,6 +491,9 @@ export class MultiAuthStore {
         accounts: [],
       }
       state.providers[providerId] = pool
+      if (isNewPool && input.upstreamConfigured !== undefined) {
+        pool.upstreamConfigured = input.upstreamConfigured
+      }
       if (input.pool?.policy !== undefined) pool.policy = input.pool.policy
       if (input.pool?.affinity !== undefined) pool.affinity = input.pool.affinity
       if (input.pool?.includeUpstream !== undefined) pool.includeUpstream = input.pool.includeUpstream
@@ -453,6 +516,22 @@ export class MultiAuthStore {
       }
       pool.accounts.push(account)
       return publicAccount(account)
+    })
+  }
+
+  /**
+   * Records whether an upstream credential was observed to exist for a pooled
+   * provider. The manager writes the derived value for legacy pools (missing
+   * field) and upgrades it when a live core credential later appears; the
+   * rotation excludes the upstream slot while this is explicitly false.
+   */
+  async setUpstreamConfigured(providerId: string, value: boolean): Promise<void> {
+    assertSafeKey(providerId, 'provider id')
+    await this.mutate(state => {
+      const pool = state.providers[providerId]
+      if (pool === undefined) throw new Error(`multiprovider: no pool for "${providerId}"`)
+      if (value) pool.upstreamConfigured = true
+      else pool.upstreamConfigured = false
     })
   }
 
