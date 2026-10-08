@@ -13,7 +13,7 @@ globalThis.fetch = async () => new Response('', { status: 503 });
 let session;
 try {
   const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, VERSION } = await import('@earendil-works/pi-coding-agent');
-  assert.equal(VERSION, '1.0.0', 'test the actual pinned Pi host, not a stale override');
+  assert.equal(VERSION, '1.1.0', 'test the actual pinned Pi host, not a stale override');
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   for (const name of ['@earendil-works/pi-ai', '@earendil-works/pi-agent-core', '@earendil-works/pi-coding-agent', '@earendil-works/pi-tui', 'typebox']) {
     assert.equal(manifest.dependencies?.[name], undefined, `${name}: host packages must not be runtime dependencies`);
