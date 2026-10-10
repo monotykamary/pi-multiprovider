@@ -14,6 +14,7 @@ import {
 } from '@earendil-works/pi-ai'
 import {
   failureFrom,
+  handOffAffinity,
   mergeHeaders,
   replayTerminal,
   type BufferedTerminal,
@@ -42,6 +43,34 @@ const SAME_ACCOUNT_RETRY_DELAY_MS = 250
 // contain this separator: it composes scheduler ids and backend account ids.
 export const VIRTUAL_ID_SEPARATOR = '::'
 export const BACKEND_UNAVAILABLE_PREFIX = 'multiprovider: virtual backend unavailable'
+
+// Transport failures that never reached the backend: an unreachable or
+// unconfigured backing provider is backend-local, so the virtual pool cools it
+// down and fails over instead of surfacing a fatal error. Mirrors the network
+// section of pi-ai's retry classifier — SDKs report these without an HTTP
+// status (OpenAI and Anthropic SDKs say "Connection error.", undici says
+// "fetch failed" or "terminated").
+const BACKEND_TRANSPORT_FAILURE = new RegExp([
+  'fetch failed',
+  'network',
+  'connection.?(?:error|refused|reset|lost|closed)',
+  'other side closed',
+  'upstream.?connect',
+  'reset before headers',
+  'socket hang up',
+  'socket connection was closed',
+  'econn(?:aborted|refused|reset)',
+  'enotfound',
+  'eai_again',
+  'ehostunreach',
+  'enetunreach',
+  'etimedout',
+  'und_err',
+  'getaddrinfo',
+  'timed? ?out',
+  'terminated',
+  'not configured',
+].join('|'), 'i')
 
 // Placeholder credential the virtual provider reports to the host so its
 // models pass auth-availability checks; real auth resolves per attempt at the
@@ -114,10 +143,9 @@ export function createVirtualIntegrations(
           metadata: { virtual: true, providerId: backend.providerId, modelId: backend.modelId },
         })),
     classifyFailure: (failure: ProviderAttemptFailure) => {
-      const message = failure.message.toLowerCase()
       if (
         failure.message.startsWith(BACKEND_UNAVAILABLE_PREFIX)
-        || /fetch failed|network|econn(?:aborted|refused|reset)|enotfound|etimedout|socket hang up|not configured/.test(message)
+        || BACKEND_TRANSPORT_FAILURE.test(failure.message)
       ) {
         return { kind: 'transient' as const, retryable: true }
       }
@@ -343,7 +371,10 @@ function virtualStream<TApi extends Api>(
           if (!settled) lease.release({ status: 'cancelled' })
         }
 
-        if (leaseOutcome === 'surface') break
+        if (leaseOutcome === 'surface') {
+          await handOffAffinity(service, schedulerId, affinityKey, attempted)
+          break
+        }
       }
 
       if (lastTerminal !== undefined) {

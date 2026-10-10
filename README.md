@@ -124,7 +124,7 @@ Session affinity can pin a healthy account to the current Pi session. Explicit r
 
 A rejected account is not abandoned on the first error. Each stream absorbs up to `errorsBeforeSwitch` (default **3**, configurable in the `/multilogin` Scheduler panel) pre-output errors on the same account—separated by a short pause—before releasing the lease, applying the failure cooldown, and moving to the next account. Errors after output has started and non-retryable failures surface immediately, exactly as before.
 
-When [pi-fabric](https://github.com/monotykamary/pi-fabric) is installed, failing over to a different account first compacts the session with fabric's deterministic, LLM-free compaction engine. The failing request surfaces its error, the session compacts while the retry backoff runs, and the retry lands on the next account with a small context instead of a huge cold prefill. This is the default behavior; without fabric installed, streams rotate accounts inline as before.
+When [pi-fabric](https://github.com/monotykamary/pi-fabric) is installed, failing over to a different account first compacts the session with fabric's deterministic, LLM-free compaction engine. The failing request surfaces its error, the session's affinity moves to the next healthy account, the session compacts while the retry backoff runs, and the retry lands on that account with a small context instead of a huge cold prefill—even when the failed account's cooldown is shorter than the retry backoff. Explicit `/switch-account` pins are kept. This is the default behavior; without fabric installed, streams rotate accounts inline as before.
 
 ## Virtual providers
 
@@ -139,7 +139,7 @@ Create one with `/vprovider`:
 Behavior details:
 
 - Each request resolves auth at the backing provider layer: the provider's own ambient credential (Pi `/login`, auth.json, environment) or, when the backing provider has a multiprovider pool, its pooled accounts with their own failover.
-- A failing backend fails over to the next one before any output streams; the failed backend cools down under the same scheduler policies as account pools.
+- A failing backend fails over to the next one before any output streams; the failed backend cools down under the same scheduler policies as account pools. Transport failures reported without an HTTP status—`Connection error.`, `fetch failed`, timeouts, refused or reset connections, DNS failures—count as transient backend failures too.
 - `/switch-account` works on virtual models too: pin the session to one backing provider model, or return to automatic rotation.
 - Virtual provider configs are stored (credential-free) in `multiprovider-auth.json` next to the account pools.
 - Mixing backends from different model families is allowed, but the virtual model advertises the first healthy backend's context window and pricing, and prompt caches never transfer between providers.

@@ -167,6 +167,7 @@ function harness(
   options: {
     errorsBeforeSwitch?: number
     onFailover?: VirtualProviderDependencies['onFailover']
+    now?: () => number
   } = {},
 ) {
   const attempts: Attempt[] = []
@@ -194,6 +195,7 @@ function harness(
   ])
   const service = new MultiProviderService({
     randomInt: () => 0,
+    ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.errorsBeforeSwitch === undefined ? {} : { errorsBeforeSwitch: options.errorsBeforeSwitch }),
   })
   for (const integration of createVirtualIntegrations(config)) {
@@ -441,6 +443,56 @@ describe('virtual providers', () => {
       failure: expect.objectContaining({ message: 'HTTP 500', outputStarted: false }),
       errorsOnAccount: 3,
     })])
+  })
+
+  it('classifies status-less transport failures as transient backend failures', () => {
+    const [integration] = createVirtualIntegrations(config)
+    const classify = (message: string) =>
+      integration!.classifyFailure!({ message, outputStarted: false }, undefined as never)
+    for (const message of [
+      'Connection error.',
+      'fetch failed',
+      'Request timed out.',
+      'terminated',
+      'other side closed',
+      'getaddrinfo ENOTFOUND api.example.invalid',
+      'connect ECONNREFUSED 127.0.0.1:443',
+      'upstream connect error or disconnect/reset before headers',
+      'UND_ERR_SOCKET',
+    ]) {
+      expect(classify(message), message).toEqual({ kind: 'transient', retryable: true })
+    }
+    // Everything else keeps the scheduler's default status-based classification.
+    expect(classify('HTTP 400 invalid request')).toBeUndefined()
+    expect(classify('429 rate limit exceeded')).toBeUndefined()
+  })
+
+  it('fails over to the next backend after connection errors without an HTTP status', async () => {
+    const { virtual, attempts } = harness({
+      a: () => errorStream('Connection error.'),
+      b: () => okStream('from-b'),
+    })
+    const events = await collect(virtual.stream(virtual.getModels()[0]!, context))
+    expect(events.at(-1)).toMatchObject({ type: 'done' })
+    expect(attempts.map(attempt => attempt.model)).toEqual(['model-a', 'model-a', 'model-a', 'model-b'])
+  })
+
+  it('lands the host retry on the next backend after a surfaced failover', async () => {
+    let now = 1_000
+    const { virtual, attempts } = harness(
+      { a: () => errorStream('Connection error.'), b: () => okStream('from-b') },
+      {},
+      { onFailover: () => true, now: () => now },
+    )
+    const model = virtual.getModels()[0]!
+    const first = await collect(virtual.stream(model, context))
+    expect(first.at(-1)).toMatchObject({ type: 'error' })
+    // The host's retry backoff outlasts the failed backend's short transient
+    // cooldown; the session must not drift back to it.
+    now += 60_000
+    const retry = await collect(virtual.stream(model, context))
+    expect(retry.at(-1)).toMatchObject({ type: 'done' })
+    expect(attempts.map(attempt => attempt.model)).toEqual(['model-a', 'model-a', 'model-a', 'model-b'])
   })
 
   it('reports unconfigured auth when no backend provider is configured', async () => {

@@ -95,6 +95,28 @@ export function failureFrom(
   }
 }
 
+// A surfaced failover ends the stream and leaves the retry to the host (e.g.
+// compact-then-retry). Re-point the session's implicit affinity at the next
+// healthy account now: a short transient cooldown can expire before the host
+// retries, and the retry run would otherwise land on the failed account again.
+// Explicit /switch-account pins and pools without affinity are left alone.
+export async function handOffAffinity(
+  service: MultiProviderService,
+  providerId: string,
+  affinityKey: string | undefined,
+  excludeAccountIds: Iterable<string>,
+): Promise<void> {
+  if (affinityKey === undefined) return
+  try {
+    if (!service.getPoolPreference(providerId).affinity) return
+    if (service.getAffinity(providerId, affinityKey)?.explicit === true) return
+    const next = await service.acquire({ providerId, affinityKey, excludeAccountIds })
+    next.release({ status: 'cancelled' })
+  } catch {
+    // No other account is available; the retry uses normal selection.
+  }
+}
+
 function callProvider<TApi extends Api>(
   provider: Provider<TApi>,
   kind: StreamKind,
@@ -326,7 +348,10 @@ function liftedStream<TApi extends Api, TCredentialRef>(
           if (!settled) lease.release({ status: 'cancelled' })
         }
 
-        if (leaseOutcome === 'surface') break
+        if (leaseOutcome === 'surface') {
+          await handOffAffinity(service, provider.id, affinityKey, attempted)
+          break
+        }
       }
 
       if (lastRejected !== undefined) {
