@@ -280,6 +280,7 @@ export class MultiProviderService {
         ...(runtime.cooldownUntil > now ? { cooldownUntil: runtime.cooldownUntil } : {}),
         ...(runtime.lastSelectedAt === undefined ? {} : { lastSelectedAt: runtime.lastSelectedAt }),
         ...(runtime.lastFailureKind === undefined ? {} : { lastFailureKind: runtime.lastFailureKind }),
+        ...this.modelCooldownSnapshot(registration.id, account.id, now),
         metadata: account.metadata ?? {},
       }))
       providers.push({
@@ -548,6 +549,24 @@ export class MultiProviderService {
       if (modelCooldown > now) blocking.push(modelCooldown)
     }
     return blocking
+  }
+
+  // Active account-model cooldowns for one account, keyed by model id, so
+  // /accounts can show why a "ready" account is skipped for one model.
+  private modelCooldownSnapshot(
+    providerId: string,
+    accountId: string,
+    now: number,
+  ): { modelCooldowns?: Record<string, number> } {
+    let cooldowns: Record<string, number> | undefined
+    for (const [key, runtime] of this.modelRuntime) {
+      if (runtime.cooldownUntil <= now) continue
+      const [keyProviderId, modelId, keyAccountId] = JSON.parse(key) as [string, string, string]
+      if (keyProviderId !== providerId || keyAccountId !== accountId) continue
+      cooldowns ??= {}
+      cooldowns[modelId] = runtime.cooldownUntil
+    }
+    return cooldowns === undefined ? {} : { modelCooldowns: cooldowns }
   }
 
   // Drops model-scoped health evidence for a provider, narrowed by a keep

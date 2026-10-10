@@ -500,8 +500,11 @@ function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot
       const cooldown = account.cooldownUntil === undefined
         ? ''
         : ` · cooldown until ${new Date(account.cooldownUntil).toLocaleTimeString()}`
+      const modelCooldowns = Object.entries(account.modelCooldowns ?? {})
+        .map(([modelId, until]) => ` · ${modelId} cooldown until ${new Date(until).toLocaleTimeString()}`)
+        .join('')
       lines.push(
-        `  ${account.label} (${account.authKind}) · ${account.status} · w${account.weight} · p${account.priority} · ${account.inFlight} in flight · ${account.consecutiveFailures} failures${cooldown}`,
+        `  ${account.label} (${account.authKind}) · ${account.status} · w${account.weight} · p${account.priority} · ${account.inFlight} in flight · ${account.consecutiveFailures} failures${cooldown}${modelCooldowns}`,
       )
     }
   }

@@ -33,7 +33,7 @@ If an account fails before visible output, the lift can cool it down and retry a
 | 🔀 | **Four pool strategies** | Round robin, weighted round robin, least in flight, or priority failover. |
 | 🔃 | **`/switch-account`** | Session pin to one pooled account for the current model—restored when the session is resumed; pool settings untouched. |
 | 🧬 | **Upstream merge** | Optionally treats Pi's normal `/login`, `auth.json`, environment, or ambient credential as another account—editable inline like any stored account. |
-| 🩺 | **Health-aware leases** | Tracks in-flight work, failures, cooldowns, session affinity, and retry exclusions. |
+| 🩺 | **Health-aware leases** | Tracks in-flight work, failures, cooldowns (account-wide or scoped to one model), session affinity, and retry exclusions. |
 | ♻️ | **In-place reauthentication** | Re-run a provider login for an existing account and swap its credential without losing label, weight, priority, or session pins. |
 | 🛡️ | **Stream-safe failover** | Suppresses a rejected attempt's start/error events and retries only before user-visible output. |
 | 🧱 | **Error tolerance before switching** | Absorbs up to 3 pre-output errors on the same account before failing over, so one blip never pays a cold-cache switch. |
@@ -247,6 +247,21 @@ export default function providerExtension(pi: ExtensionAPI) {
 ```
 
 Credential references are intentionally opaque. Account inventory, refresh, billing, quota, and provider-specific metadata remain provider-owned. Re-announce after a provider re-registers dynamically; the bundled extension also reconciles its lift before every agent run.
+
+#### Model-scoped account health
+
+Health is account-wide by default: a failed request cools the account down for every model. When an account cannot serve one model—its plan lacks the model, a rollout has not reached it, or workspace membership differs—`classifyFailure` can return `scope: 'account-model'`:
+
+```ts
+classifyFailure(failure) {
+  if (/model .* not (?:available|supported)/i.test(failure.message)) {
+    return { kind: 'quota', retryable: true, scope: 'account-model' }
+  }
+  return undefined // default status-based classification, account-wide
+},
+```
+
+The lift passes the exact requested `model.id` to the scheduler, so that cooldown applies only to that `(provider, model, account)` combination: the account stays eligible for other models, a later success on the same model clears it, and removing or reauthenticating the account drops it. Omitting `scope` keeps the account-wide behavior, and the pool—not the caller—still chooses the account. `/accounts` lists active per-model cooldowns next to the account.
 
 ### Session account service event
 

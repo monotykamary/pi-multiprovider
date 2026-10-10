@@ -478,6 +478,25 @@ describe('MultiProviderService', () => {
     expect(await select(service, { modelId: 'model-y' })).toBe('b')
   })
 
+  it('reports active model-scoped cooldowns in the snapshot', async () => {
+    let now = 1_000
+    const service = new MultiProviderService({ now: () => now })
+    service.registerProvider({
+      id: 'example',
+      label: 'Example',
+      accounts: () => accounts,
+      classifyFailure: () => ({ kind: 'quota', retryable: true, cooldownMs: 5_000, scope: 'account-model' as const }),
+    })
+    const lease = await service.acquire({ providerId: 'example', modelId: 'model-x', excludeAccountIds: ['b'] })
+    lease.release({ status: 'failure', error: { message: 'model', outputStarted: false } })
+    const [first, second] = (await service.snapshot()).providers[0]!.accounts
+    // The account stays ready for other models; the model cooldown is listed.
+    expect(first).toMatchObject({ id: 'a', status: 'ready', modelCooldowns: { 'model-x': 6_000 } })
+    expect(second).not.toHaveProperty('modelCooldowns')
+    now = 6_000
+    expect((await service.snapshot()).providers[0]!.accounts[0]).not.toHaveProperty('modelCooldowns')
+  })
+
   it('does not store credentials in model health state', async () => {
     const service = modelHealthScheduler()
     const lease = await service.acquire({ providerId: 'example', modelId: 'model-x', excludeAccountIds: ['b'] })

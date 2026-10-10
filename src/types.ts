@@ -119,6 +119,9 @@ export interface PublicAccountSnapshot {
   cooldownUntil?: number
   lastSelectedAt?: number
   lastFailureKind?: FailureKind
+  // Active account-model cooldowns (model id -> cooldown end), present only
+  // when a classifier scoped a failure to one model of this account.
+  modelCooldowns?: Readonly<Record<string, number>>
   metadata: Readonly<Record<string, string | number | boolean | null>>
 }
 
