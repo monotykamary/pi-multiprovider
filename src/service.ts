@@ -97,6 +97,27 @@ function defaultDisposition(failure: ProviderAttemptFailure): FailureDisposition
   return { kind: 'fatal', retryable: false }
 }
 
+// One step of smooth weighted round robin: every account gains its weight,
+// the highest score wins (ties keep pool order) and pays back the total.
+function smoothWeightedStep(
+  scores: Map<string, number>,
+  accounts: EffectiveAccount[],
+  total: number,
+): EffectiveAccount {
+  let selected = accounts[0]!
+  let best = Number.NEGATIVE_INFINITY
+  for (const item of accounts) {
+    const score = (scores.get(item.account.id) ?? 0) + Math.max(1, item.weight)
+    scores.set(item.account.id, score)
+    if (score > best) {
+      best = score
+      selected = item
+    }
+  }
+  scores.set(selected.account.id, (scores.get(selected.account.id) ?? 0) - total)
+  return selected
+}
+
 export class MultiProviderService {
   private readonly providers = new Map<string, ProviderRegistration>()
   private readonly preferences = new Map<string, PoolPreference>()
@@ -492,26 +513,22 @@ export class MultiProviderService {
   }
 
   private selectWeighted(providerId: string, accounts: EffectiveAccount[]): EffectiveAccount {
+    const total = accounts.reduce((sum, item) => sum + Math.max(1, item.weight), 0)
     let scores = this.smoothScores.get(providerId)
     if (scores === undefined) {
       scores = new Map()
       this.smoothScores.set(providerId, scores)
+      // Smooth weighted rotation starts every score at zero, so a fresh
+      // process would always land its first pick on the heaviest account.
+      // Advance a random number of steps into one cycle (total picks, each
+      // account chosen weight times): the first pick lands on an account with
+      // probability weight / total and the in-process shares stay exact.
+      const warmup = total > 1 ? this.randomInt(total) : 0
+      for (let step = 0; step < warmup; step += 1) smoothWeightedStep(scores, accounts, total)
     }
     const live = new Set(accounts.map(item => item.account.id))
     for (const id of scores.keys()) if (!live.has(id)) scores.delete(id)
-    const total = accounts.reduce((sum, item) => sum + Math.max(1, item.weight), 0)
-    let selected = accounts[0]!
-    let best = Number.NEGATIVE_INFINITY
-    for (const item of accounts) {
-      const score = (scores.get(item.account.id) ?? 0) + Math.max(1, item.weight)
-      scores.set(item.account.id, score)
-      if (score > best) {
-        best = score
-        selected = item
-      }
-    }
-    scores.set(selected.account.id, (scores.get(selected.account.id) ?? 0) - total)
-    return selected
+    return smoothWeightedStep(scores, accounts, total)
   }
 
   // Cooldowns currently blocking one account for one model: the account-wide

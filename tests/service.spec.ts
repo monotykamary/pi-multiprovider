@@ -184,6 +184,53 @@ describe('MultiProviderService', () => {
     expect(picks.filter(id => id === 'b')).toHaveLength(2)
   })
 
+  it('spreads first picks of fresh weighted schedulers by weight', async () => {
+    // Every pi -p run or subagent child is a new process whose first pick
+    // pins the session; the heaviest account must not win every time.
+    const weighted: ProviderAccount<string>[] = [
+      { id: 'heavy', label: 'Heavy', authKind: 'api-key', credentialRef: 'h', weight: 6 },
+      { id: 'light', label: 'Light', authKind: 'api-key', credentialRef: 'l', weight: 4 },
+    ]
+    for (const setup of [
+      { selectionBias: 'none' as const },
+      { defaultPolicy: 'weighted-round-robin' as const },
+    ]) {
+      const firstPicks: string[] = []
+      for (let offset = 0; offset < 10; offset += 1) {
+        const service = new MultiProviderService({
+          randomInt: maxExclusive => offset % maxExclusive,
+          ...(setup.defaultPolicy === undefined ? {} : { defaultPolicy: setup.defaultPolicy }),
+        })
+        service.registerProvider({
+          id: 'example',
+          label: 'Example',
+          ...(setup.selectionBias === undefined ? {} : { selectionBias: setup.selectionBias }),
+          accounts: () => weighted,
+        })
+        firstPicks.push(await select(service, { affinityKey: 'fresh-session' }))
+      }
+      expect(firstPicks.filter(id => id === 'heavy')).toHaveLength(6)
+      expect(firstPicks.filter(id => id === 'light')).toHaveLength(4)
+    }
+  })
+
+  it('keeps exact weighted shares within a process after a random start', async () => {
+    const service = new MultiProviderService({ affinity: false, randomInt: () => 3 })
+    service.registerProvider({
+      id: 'example',
+      label: 'Example',
+      selectionBias: 'none',
+      accounts: () => [
+        { id: 'heavy', label: 'Heavy', authKind: 'api-key', credentialRef: 'h', weight: 6 },
+        { id: 'light', label: 'Light', authKind: 'api-key', credentialRef: 'l', weight: 4 },
+      ],
+    })
+    const picks: string[] = []
+    for (let i = 0; i < 20; i++) picks.push(await select(service))
+    expect(picks.filter(id => id === 'heavy')).toHaveLength(12)
+    expect(picks.filter(id => id === 'light')).toHaveLength(8)
+  })
+
   it('spills new sessions to the next account while the main account cools down', async () => {
     let now = 1_000
     const service = scheduler({ now: () => now, affinity: false })
