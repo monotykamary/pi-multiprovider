@@ -1,5 +1,5 @@
 import type { Api, AuthType, Credential, Model, Provider } from '@earendil-works/pi-ai'
-import { normalizeContext } from '@earendil-works/pi-ai'
+import { isRetryableAssistantError, normalizeContext } from '@earendil-works/pi-ai'
 import {
   DynamicBorder,
   type ExtensionAPI,
@@ -500,8 +500,11 @@ function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot
       const cooldown = account.cooldownUntil === undefined
         ? ''
         : ` · cooldown until ${new Date(account.cooldownUntil).toLocaleTimeString()}`
+      const modelCooldowns = Object.entries(account.modelCooldowns ?? {})
+        .map(([modelId, until]) => ` · ${modelId} cooldown until ${new Date(until).toLocaleTimeString()}`)
+        .join('')
       lines.push(
-        `  ${account.label} (${account.authKind}) · ${account.status} · w${account.weight} · p${account.priority} · ${account.inFlight} in flight · ${account.consecutiveFailures} failures${cooldown}`,
+        `  ${account.label} (${account.authKind}) · ${account.status} · w${account.weight} · p${account.priority} · ${account.inFlight} in flight · ${account.consecutiveFailures} failures${cooldown}${modelCooldowns}`,
       )
     }
   }
@@ -552,6 +555,14 @@ function uniqueProviders(
   return providers.sort((left, right) => left.name.localeCompare(right.name))
 }
 
+// Pi rebuilds a provider that has models.json or extension overlays into a new
+// object on every registration, and that object keeps only `headers` from the
+// registered provider by reference. Each lift therefore gets its own headers
+// object, so the registry's copy of a lift is still recognized as that lift.
+const isLiftOf = (current: Provider<Api> | undefined, lift: Provider<Api> | undefined): boolean =>
+  current !== undefined && lift !== undefined
+  && (current === lift || (lift.headers !== undefined && current.headers === lift.headers))
+
 // Pi loads one instance of this extension per session, and subagent sessions
 // share the parent's provider registry. Each instance lifts the real base
 // provider, never another instance's lift, so shutting one instance down cannot
@@ -559,14 +570,22 @@ function uniqueProviders(
 // and virtual providers) decides what a departing instance hands the registry
 // back to, in whatever order sessions end.
 const LIFTED_BASE = Symbol.for('pi-multiprovider.lifted-base')
+type LiftedProvider = Provider<Api> & { [LIFTED_BASE]: Provider<Api> }
 const liveProviders: Map<string, Provider<Api>[]> = ((globalThis as unknown as Record<symbol, Map<string, Provider<Api>[]> | undefined>)[
   Symbol.for('pi-multiprovider.live-providers')
 ] ??= new Map())
 
-const realBase = (provider: Provider<Api> | undefined): Provider<Api> | undefined => {
+// The registry's copy of another instance's lift may be Pi's composed wrapper,
+// which carries no tag of its own; match it against the live lifts instead.
+const realBase = (providerId: string, provider: Provider<Api> | undefined): Provider<Api> | undefined => {
   let base = provider
-  while (base !== undefined && LIFTED_BASE in base) {
-    base = (base as Provider<Api> & { [LIFTED_BASE]: Provider<Api> })[LIFTED_BASE]
+  while (base !== undefined) {
+    const candidate: Provider<Api> = base
+    const lift = LIFTED_BASE in candidate
+      ? candidate
+      : liveProviders.get(providerId)?.find(live => LIFTED_BASE in live && isLiftOf(candidate, live))
+    if (lift === undefined) break
+    base = (lift as LiftedProvider)[LIFTED_BASE]
   }
   return base
 }
@@ -722,6 +741,10 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const integration = effectiveIntegration(info.providerId)
     const handled = integration?.onFailover?.(info) === true
     if (!isFabricCompactionAvailable()) return handled
+    // Compaction surfaces the failure and relies on Pi to restart the turn.
+    // Quota/auth failures are not host-retryable, so keep rotating inline.
+    if (info.failure.assistantMessage === undefined
+      || !isRetryableAssistantError(info.failure.assistantMessage)) return handled
     void runFailoverCompaction(info)
     return true
   }
@@ -731,7 +754,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     const installed = installedProviders.get(providerId)
     const current = ctx?.modelRegistry.getProvider(providerId)
     const newestLiveLift = replaceLiveProvider(providerId, installed)
-    if (base !== undefined && (ctx === undefined || current === installed)) pi.registerProvider(newestLiveLift ?? base)
+    if (base !== undefined && (ctx === undefined || isLiftOf(current, installed))) pi.registerProvider(newestLiveLift ?? base)
     installedProviders.delete(providerId)
     baseProviders.delete(providerId)
     registeredIntegrations.delete(providerId)
@@ -748,7 +771,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
 
     const current = ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
     const priorLift = installedProviders.get(providerId)
-    const base = realBase(current === priorLift ? baseProviders.get(providerId) : current)
+    const base = realBase(providerId, isLiftOf(current, priorLift) ? baseProviders.get(providerId) : current)
     if (base === undefined) {
       if (!warnedMissing.has(providerId)) {
         warnedMissing.add(providerId)
@@ -779,14 +802,18 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
       })
     }
 
-    if (current === priorLift && baseProviders.get(providerId) === base) return
+    if (isLiftOf(current, priorLift) && baseProviders.get(providerId) === base) return
     const sessionId = ctx.sessionManager.getSessionId()
     const affinityKey = integration.affinityKey ?? (() => sessionId)
-    const lifted = liftProvider(base, service, {
-      ...integration,
-      affinityKey,
-      onFailover: handleFailover,
-    })
+    const lifted: Provider<Api> = {
+      ...liftProvider(base, service, {
+        ...integration,
+        affinityKey,
+        onFailover: handleFailover,
+      }),
+      // A headers object of its own lets isLiftOf() see through Pi's composition.
+      headers: { ...base.headers },
+    }
     Object.defineProperty(lifted, LIFTED_BASE, { value: base })
     replaceLiveProvider(providerId, priorLift, lifted)
     pi.registerProvider(lifted)
@@ -806,7 +833,7 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
     for (const providerId of storedIds) {
       const current = ctx.modelRegistry.getProvider(providerId) as Provider<Api> | undefined
       const priorLift = installedProviders.get(providerId)
-      const base = realBase(current === priorLift ? baseProviders.get(providerId) : current)
+      const base = realBase(providerId, isLiftOf(current, priorLift) ? baseProviders.get(providerId) : current)
       if (base === undefined) continue
       if (managedBases.get(providerId) !== base) {
         managedBases.set(providerId, base)

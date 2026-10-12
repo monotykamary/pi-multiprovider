@@ -13,7 +13,7 @@ globalThis.fetch = async () => new Response('', { status: 503 });
 let session;
 try {
   const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, VERSION } = await import('@earendil-works/pi-coding-agent');
-  assert.equal(VERSION, '0.99.0', 'test the actual pinned Pi host, not a stale override');
+  assert.equal(VERSION, '1.1.0', 'test the actual pinned Pi host, not a stale override');
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   for (const name of ['@earendil-works/pi-ai', '@earendil-works/pi-agent-core', '@earendil-works/pi-coding-agent', '@earendil-works/pi-tui', 'typebox']) {
     assert.equal(manifest.dependencies?.[name], undefined, `${name}: host packages must not be runtime dependencies`);
@@ -29,6 +29,11 @@ try {
   assert.ok(loaded.extensions.length > 0, 'manifest entrypoints must load');
   const modelRuntime = await ModelRuntime.create({ authPath: join(home, 'auth.json'), modelsPath: null, modelsStorePath: join(home, 'models-cache'), allowModelNetwork: false });
   ({ session } = await createAgentSession({ cwd: home, agentDir: home, resourceLoader, modelRuntime, settingsManager, sessionManager: SessionManager.inMemory(home) }));
+  const errors = [];
+  session.extensionRunner.onError(error => errors.push(error));
+  await session.bindExtensions({});
+  await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+  assert.deepEqual(errors, [], 'real session startup and shutdown must succeed');
   const names = new Set();
   for (const extension of loaded.extensions) {
     for (const [name, { definition }] of extension.tools) {
@@ -42,7 +47,10 @@ try {
   }
   console.log(`${manifest.name}: Pi ${VERSION} warning-free manifest load; ${loaded.extensions.length} extensions, ${names.size} tools registered`);
 } finally {
-  session?.dispose();
+  if (session) {
+    await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
+    session.dispose();
+  }
   globalThis.fetch = previousFetch;
   if (previousHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousHome;
