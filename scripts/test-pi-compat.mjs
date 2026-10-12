@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,6 +34,18 @@ try {
   await session.bindExtensions({});
   await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
   assert.deepEqual(errors, [], 'real session startup and shutdown must succeed');
+  // The extension recognizes its own lift through Pi's provider composition by
+  // the headers object the composed wrapper shares with the registered provider.
+  const probeModel = { id: 'probe', name: 'Probe', api: 'probe-api', provider: 'compose-probe', baseUrl: 'https://probe.invalid',
+    reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1_000, maxTokens: 100 };
+  const native = { id: 'compose-probe', name: 'Probe', headers: {}, auth: { apiKey: { name: 'Probe key', resolve: async () => undefined } },
+    getModels: () => [probeModel], stream() {}, streamSimple() {} };
+  await writeFile(join(home, 'models.json'), JSON.stringify({ providers: { 'compose-probe': { modelOverrides: { probe: { contextWindow: 2_000 } } } } }));
+  const composing = await ModelRuntime.create({ authPath: join(home, 'auth.json'), modelsPath: join(home, 'models.json'), modelsStorePath: join(home, 'models-cache'), allowModelNetwork: false });
+  composing.registerNativeProvider(native);
+  const composed = composing.getProvider('compose-probe');
+  assert.notEqual(composed, native, 'a models.json overlay must compose the registered provider');
+  assert.equal(composed?.headers, native.headers, 'composed providers must keep the registered headers object');
   const names = new Set();
   for (const extension of loaded.extensions) {
     for (const [name, { definition }] of extension.tools) {
