@@ -108,51 +108,82 @@ function composedRegistry() {
   }
 }
 
+// Boots one extension instance (one Pi session) against the shared registry.
+async function launch(registry: ReturnType<typeof composedRegistry>, sessionId: string) {
+  const handlers = new Map<string, ((event: unknown, ctx: unknown) => Promise<void> | void)[]>()
+  const ctx = {
+    ui: { notify() {} },
+    mode: 'print',
+    hasUI: false,
+    cwd: process.cwd(),
+    sessionManager: { getSessionId: () => sessionId, getEntries: () => [] },
+    modelRegistry: { getProvider: registry.get, getAll: () => [model] },
+    model,
+    isIdle: () => true,
+  } as unknown as ExtensionContext
+  const pi = {
+    events: { emit() {}, on: () => () => {} },
+    on(name: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) {
+      handlers.set(name, [...(handlers.get(name) ?? []), handler])
+    },
+    registerProvider: (provider: Provider<'probe-api'>) => registry.register(provider),
+    unregisterProvider() {},
+    getAllTools: () => [],
+    registerCommand() {},
+    appendEntry() {},
+  }
+  await multiprovider(pi as unknown as ExtensionAPI)
+  return async (...names: string[]) => {
+    for (const name of names) {
+      for (const handler of handlers.get(name) ?? []) await handler({ type: name }, ctx)
+    }
+  }
+}
+
+// Resolves auth the way Pi does, streams through the registry's provider, and
+// returns the API keys the real base provider was called with.
+async function request(registry: ReturnType<typeof composedRegistry>) {
+  served.length = 0
+  const provider = registry.get('example')!
+  const resolved = await provider.auth.apiKey!.resolve({
+    ctx: { env: async () => undefined, fileExists: async () => false },
+    signal: new AbortController().signal,
+  } as never)
+  await provider.streamSimple(model, normalizeContext({ messages: [] }), {
+    apiKey: resolved!.auth.apiKey!,
+    headers: resolved!.auth.headers!,
+  }).result()
+  return [...served]
+}
+
 describe('provider composition', () => {
   it('lifts the base once when the registry returns a composed wrapper', async () => {
     const registry = composedRegistry()
-    const handlers = new Map<string, ((event: unknown, ctx: unknown) => Promise<void> | void)[]>()
-    const ctx = {
-      ui: { notify() {} },
-      mode: 'print',
-      hasUI: false,
-      cwd: process.cwd(),
-      sessionManager: { getSessionId: () => 'session-1', getEntries: () => [] },
-      modelRegistry: { getProvider: registry.get, getAll: () => [model] },
-      model,
-      isIdle: () => true,
-    } as unknown as ExtensionContext
-    const pi = {
-      events: { emit() {}, on: () => () => {} },
-      on(name: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) {
-        handlers.set(name, [...(handlers.get(name) ?? []), handler])
-      },
-      registerProvider: (provider: Provider<'probe-api'>) => registry.register(provider),
-      unregisterProvider() {},
-      getAllTools: () => [],
-      registerCommand() {},
-      appendEntry() {},
-    }
-    await multiprovider(pi as unknown as ExtensionAPI)
-    for (const name of ['session_start', 'before_agent_start', 'before_agent_start']) {
-      for (const handler of handlers.get(name) ?? []) await handler({ type: name }, ctx)
-    }
+    const emit = await launch(registry, 'session-1')
+    await emit('session_start', 'before_agent_start', 'before_agent_start')
 
     expect(registry.registrations).toBe(1)
 
-    // Resolve auth the way Pi does, then stream through the registry's provider.
-    const provider = registry.get('example')!
-    const resolved = await provider.auth.apiKey!.resolve({
-      ctx: { env: async () => undefined, fileExists: async () => false },
-      signal: new AbortController().signal,
-    } as never)
-    await provider.streamSimple(model, normalizeContext({ messages: [] }), {
-      apiKey: resolved!.auth.apiKey!,
-      headers: resolved!.auth.headers!,
-    }).result()
-
     // A second lift would strip the upstream marker and skip Pi's own
     // credential in favour of the stored account.
-    expect(served).toEqual(['k-default'])
+    expect(await request(registry)).toEqual(['k-default'])
+  })
+
+  it('lifts the base, not a composed copy of another session\'s lift', async () => {
+    const registry = composedRegistry()
+    const parent = await launch(registry, 'parent')
+    await parent('session_start')
+    const child = await launch(registry, 'child')
+    await child('session_start')
+
+    // The child sees the parent's lift only through Pi's composed wrapper;
+    // lifting that wrapper would send the request through the pool twice.
+    expect(await request(registry)).toEqual(['k-default'])
+
+    await parent('before_agent_start')
+    expect(await request(registry)).toEqual(['k-default'])
+
+    await child('session_shutdown')
+    expect(await request(registry)).toEqual(['k-default'])
   })
 })
