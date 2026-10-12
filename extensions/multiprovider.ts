@@ -1,6 +1,5 @@
 import type { Api, AuthType, Credential, Model, Provider } from '@earendil-works/pi-ai'
-import { normalizeContext } from '@earendil-works/pi-ai'
-import { isRetryableAssistantError } from '@earendil-works/pi-ai/compat'
+import { isRetryableAssistantError, normalizeContext } from '@earendil-works/pi-ai'
 import {
   DynamicBorder,
   type ExtensionAPI,
