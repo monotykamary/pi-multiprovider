@@ -33,7 +33,7 @@ If an account fails before visible output, the lift can cool it down and retry a
 | 🔀 | **Four pool strategies** | Round robin, weighted round robin, least in flight, or priority failover. |
 | 🔃 | **`/switch-account`** | Session pin to one pooled account for the current model—restored when the session is resumed; pool settings untouched. |
 | 🧬 | **Upstream merge** | Optionally treats Pi's normal `/login`, `auth.json`, environment, or ambient credential as another account—editable inline like any stored account. |
-| 🩺 | **Health-aware leases** | Tracks in-flight work, failures, cooldowns, session affinity, and retry exclusions. |
+| 🩺 | **Health-aware leases** | Tracks in-flight work, failures, cooldowns (account-wide or scoped to one model), session affinity, and retry exclusions. |
 | ♻️ | **In-place reauthentication** | Re-run a provider login for an existing account and swap its credential without losing label, weight, priority, or session pins. |
 | 🛡️ | **Stream-safe failover** | Suppresses a rejected attempt's start/error events and retries only before user-visible output. |
 | 🧱 | **Error tolerance before switching** | Absorbs up to 3 pre-output errors on the same account before failing over, so one blip never pays a cold-cache switch. |
@@ -112,11 +112,11 @@ Add as many accounts as you need from the same manager. Remove credentials from 
 | Strategy | Selection behavior | Good for |
 | --- | --- | --- |
 | **Round robin** | Starts at the first healthy account in pool order (the **main account**) and spills over to later accounts only while earlier ones are unavailable. Unbiased pools rotate through healthy accounts in pool order from a random starting account, and differing weights shape traffic shares. | A primary subscription with backup accounts. |
-| **Weighted round robin** | Uses smooth weighted scheduling. | Accounts with different quotas or spend limits. |
+| **Weighted round robin** | Uses smooth weighted scheduling, entered at a random point of the cycle so fresh processes split their first sessions by weight. | Accounts with different quotas or spend limits. |
 | **Least in flight** | Selects the healthy account with the least active work. | Concurrent agents and uneven request duration. |
 | **Priority failover** | Uses the lowest-priority number until it becomes unhealthy. | Primary/backup credentials. |
 
-First-account bias keeps every new session on the account listed first in the pool—**Pi default (upstream)** when included, otherwise the first stored account—so you stop seeing sessions start on a backup account while the main one has plenty of usage. Integrations that want even request rotation register with `selectionBias: 'none'`, which restores the classic rotate-through-healthy-accounts behavior: accounts rotate in pool order (the order they are configured, never re-sorted by id), the rotation starts at a random account so restarts do not favor the same one, and differing per-account weights share traffic smoothly instead of being ignored.
+First-account bias keeps every new session on the account listed first in the pool—**Pi default (upstream)** when included, otherwise the first stored account—so you stop seeing sessions start on a backup account while the main one has plenty of usage. Integrations that want even request rotation register with `selectionBias: 'none'`, which restores the classic rotate-through-healthy-accounts behavior: accounts rotate in pool order (the order they are configured, never re-sorted by id), the rotation starts at a random account so restarts do not favor the same one, and differing per-account weights share traffic smoothly instead of being ignored—each fresh process lands its first session on an account with probability proportional to its weight, so one-shot `pi -p` runs and subagent children follow the configured shares too.
 
 Session affinity can pin a healthy account to the current Pi session. Explicit retry exclusions always win, so a rejected account is not selected twice for the same logical request. Switch strategies, affinity, and per-account weight and priority at any time inside `/multilogin`. `/switch-account` sets the pinned account explicitly for one session without touching these settings. Pi Fabric participant agents inherit that pin through `PI_MULTIPROVIDER_SESSION_PINS` and rebind it to the child session, so spawned workers keep the operator's chosen account.
 
@@ -124,7 +124,7 @@ Session affinity can pin a healthy account to the current Pi session. Explicit r
 
 A rejected account is not abandoned on the first error. Each stream absorbs up to `errorsBeforeSwitch` (default **3**, configurable in the `/multilogin` Scheduler panel) pre-output errors on the same account—separated by a short pause—before releasing the lease, applying the failure cooldown, and moving to the next account. Errors after output has started and non-retryable failures surface immediately, exactly as before.
 
-When [pi-fabric](https://github.com/monotykamary/pi-fabric) is installed, failing over to a different account first compacts the session with fabric's deterministic, LLM-free compaction engine. The failing request surfaces its error, the session compacts while the retry backoff runs, and the retry lands on the next account with a small context instead of a huge cold prefill. This is the default behavior; without fabric installed, streams rotate accounts inline as before.
+When [pi-fabric](https://github.com/monotykamary/pi-fabric) is installed, account failover schedules deterministic, LLM-free session compaction only for assistant errors Pi can retry, such as HTTP `429`. The failing request surfaces its error, the session's affinity moves to the next healthy account, and compaction waits for the session to become idle during retry backoff so the retry lands on that account with a smaller context instead of a huge cold prefill—even when the failed account's cooldown is shorter than the retry backoff. Explicit `/switch-account` pins are kept. Compaction is debounced and is not guaranteed before every retry. Quota exhaustion and authentication failures rotate accounts inline without compaction, because Pi will not restart the turn for those errors. Without fabric installed, streams rotate accounts inline as before.
 
 ## Virtual providers
 
@@ -139,7 +139,7 @@ Create one with `/vprovider`:
 Behavior details:
 
 - Each request resolves auth at the backing provider layer: the provider's own ambient credential (Pi `/login`, auth.json, environment) or, when the backing provider has a multiprovider pool, its pooled accounts with their own failover.
-- A failing backend fails over to the next one before any output streams; the failed backend cools down under the same scheduler policies as account pools.
+- A failing backend fails over to the next one before any output streams; the failed backend cools down under the same scheduler policies as account pools. Transport failures reported without an HTTP status—`Connection error.`, `fetch failed`, timeouts, refused or reset connections, DNS failures—count as transient backend failures too.
 - `/switch-account` works on virtual models too: pin the session to one backing provider model, or return to automatic rotation.
 - Virtual provider configs are stored (credential-free) in `multiprovider-auth.json` next to the account pools.
 - Mixing backends from different model families is allowed, but the virtual model advertises the first healthy backend's context window and pricing, and prompt caches never transfer between providers.
@@ -247,6 +247,21 @@ export default function providerExtension(pi: ExtensionAPI) {
 ```
 
 Credential references are intentionally opaque. Account inventory, refresh, billing, quota, and provider-specific metadata remain provider-owned. Re-announce after a provider re-registers dynamically; the bundled extension also reconciles its lift before every agent run.
+
+#### Model-scoped account health
+
+Health is account-wide by default: a failed request cools the account down for every model. When an account cannot serve one model—its plan lacks the model, a rollout has not reached it, or workspace membership differs—`classifyFailure` can return `scope: 'account-model'`:
+
+```ts
+classifyFailure(failure) {
+  if (/model .* not (?:available|supported)/i.test(failure.message)) {
+    return { kind: 'quota', retryable: true, scope: 'account-model' }
+  }
+  return undefined // default status-based classification, account-wide
+},
+```
+
+The lift passes the exact requested `model.id` to the scheduler, so that cooldown applies only to that `(provider, model, account)` combination: the account stays eligible for other models, a later success on the same model clears it, and removing or reauthenticating the account drops it. Omitting `scope` keeps the account-wide behavior, and the pool—not the caller—still chooses the account. `/accounts` lists active per-model cooldowns next to the account.
 
 ### Session account service event
 

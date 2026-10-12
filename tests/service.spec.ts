@@ -27,7 +27,7 @@ function scheduler(options: ConstructorParameters<typeof MultiProviderService>[0
 
 async function select(
   service: MultiProviderService,
-  options: { affinityKey?: string; excludeAccountIds?: string[] } = {},
+  options: { modelId?: string; affinityKey?: string; excludeAccountIds?: string[] } = {},
 ): Promise<string> {
   const lease = await service.acquire<string>({ providerId: 'example', ...options })
   lease.release({ status: 'success' })
@@ -36,6 +36,22 @@ async function select(
 
 function failure(status: number): ProviderAttemptFailure {
   return { message: `HTTP ${status}`, status, outputStarted: false }
+}
+
+function modelHealthScheduler(accountsRef: { current: ProviderAccount<string>[] } = { current: accounts }): MultiProviderService {
+  const service = new MultiProviderService({ rateLimitCooldownMs: 60_000 })
+  service.registerProvider({
+    id: 'example',
+    label: 'Example',
+    accounts: () => accountsRef.current,
+    classifyFailure: failed => ({
+      kind: 'rate-limit',
+      retryable: true,
+      cooldownMs: 60_000,
+      scope: failed.message === 'account' ? 'account' : 'account-model',
+    }),
+  })
+  return service
 }
 
 describe('MultiProviderService', () => {
@@ -166,6 +182,53 @@ describe('MultiProviderService', () => {
     for (let i = 0; i < 8; i++) picks.push(await select(service))
     expect(picks.filter(id => id === 'a')).toHaveLength(6)
     expect(picks.filter(id => id === 'b')).toHaveLength(2)
+  })
+
+  it('spreads first picks of fresh weighted schedulers by weight', async () => {
+    // Every pi -p run or subagent child is a new process whose first pick
+    // pins the session; the heaviest account must not win every time.
+    const weighted: ProviderAccount<string>[] = [
+      { id: 'heavy', label: 'Heavy', authKind: 'api-key', credentialRef: 'h', weight: 6 },
+      { id: 'light', label: 'Light', authKind: 'api-key', credentialRef: 'l', weight: 4 },
+    ]
+    for (const setup of [
+      { selectionBias: 'none' as const },
+      { defaultPolicy: 'weighted-round-robin' as const },
+    ]) {
+      const firstPicks: string[] = []
+      for (let offset = 0; offset < 10; offset += 1) {
+        const service = new MultiProviderService({
+          randomInt: maxExclusive => offset % maxExclusive,
+          ...(setup.defaultPolicy === undefined ? {} : { defaultPolicy: setup.defaultPolicy }),
+        })
+        service.registerProvider({
+          id: 'example',
+          label: 'Example',
+          ...(setup.selectionBias === undefined ? {} : { selectionBias: setup.selectionBias }),
+          accounts: () => weighted,
+        })
+        firstPicks.push(await select(service, { affinityKey: 'fresh-session' }))
+      }
+      expect(firstPicks.filter(id => id === 'heavy')).toHaveLength(6)
+      expect(firstPicks.filter(id => id === 'light')).toHaveLength(4)
+    }
+  })
+
+  it('keeps exact weighted shares within a process after a random start', async () => {
+    const service = new MultiProviderService({ affinity: false, randomInt: () => 3 })
+    service.registerProvider({
+      id: 'example',
+      label: 'Example',
+      selectionBias: 'none',
+      accounts: () => [
+        { id: 'heavy', label: 'Heavy', authKind: 'api-key', credentialRef: 'h', weight: 6 },
+        { id: 'light', label: 'Light', authKind: 'api-key', credentialRef: 'l', weight: 4 },
+      ],
+    })
+    const picks: string[] = []
+    for (let i = 0; i < 20; i++) picks.push(await select(service))
+    expect(picks.filter(id => id === 'heavy')).toHaveLength(12)
+    expect(picks.filter(id => id === 'light')).toHaveLength(8)
   })
 
   it('spills new sessions to the next account while the main account cools down', async () => {
@@ -323,5 +386,124 @@ describe('MultiProviderService', () => {
     expect(service.getAffinity('example', 'session-1')).toEqual({ accountId: 'a', explicit: false })
     service.clearAffinity()
     expect(service.getAffinity('example', 'session-1')).toBeUndefined()
+  })
+
+  it('keeps account-wide failures effective for every model', async () => {
+    const service = modelHealthScheduler()
+    const lease = await service.acquire({ providerId: 'example', excludeAccountIds: ['b'] })
+    lease.release({ status: 'failure', error: { message: 'account', outputStarted: false } })
+    expect(await select(service, { modelId: 'model-x' })).toBe('b')
+    expect(await select(service, { modelId: 'model-y' })).toBe('b')
+  })
+
+  it('scopes account-model failures to the exact model', async () => {
+    const service = modelHealthScheduler()
+    const lease = await service.acquire({ providerId: 'example', modelId: 'model-x', excludeAccountIds: ['b'] })
+    lease.release({ status: 'failure', error: { message: 'model', outputStarted: false } })
+    expect(await select(service, { modelId: 'model-x' })).toBe('b')
+    expect(await select(service, { modelId: 'model-y' })).toBe('a')
+  })
+
+  it('preserves legacy behavior when modelId is omitted', async () => {
+    const service = scheduler({ affinity: false })
+    const lease = await service.acquire({ providerId: 'example', excludeAccountIds: ['b'] })
+    lease.release({ status: 'failure', error: failure(429) })
+    expect(await select(service)).toBe('b')
+  })
+
+  it('does not clear model-x evidence after model-y succeeds', async () => {
+    const service = modelHealthScheduler()
+    const failed = await service.acquire({ providerId: 'example', modelId: 'model-x', excludeAccountIds: ['b'] })
+    failed.release({ status: 'failure', error: { message: 'model', outputStarted: false } })
+    const recovered = await service.acquire({ providerId: 'example', modelId: 'model-y' })
+    expect(recovered.accountId).toBe('a')
+    recovered.release({ status: 'success' })
+    expect(await select(service, { modelId: 'model-x' })).toBe('b')
+  })
+
+  it('clears stale model evidence after success on that model', async () => {
+    const service = modelHealthScheduler()
+    const failed = await service.acquire({ providerId: 'example', modelId: 'model-x', excludeAccountIds: ['b'] })
+    const successful = await service.acquire({ providerId: 'example', modelId: 'model-x', excludeAccountIds: ['b'] })
+    failed.release({ status: 'failure', error: { message: 'model', outputStarted: false } })
+    successful.release({ status: 'success' })
+    expect(await select(service, { modelId: 'model-x' })).toBe('a')
+  })
+
+  it('cleans model evidence when an account disappears', async () => {
+    const accountsRef = { current: [...accounts] }
+    const service = modelHealthScheduler(accountsRef)
+    const lease = await service.acquire({ providerId: 'example', modelId: 'model-x', excludeAccountIds: ['b'] })
+    lease.release({ status: 'failure', error: { message: 'model', outputStarted: false } })
+    accountsRef.current = [accounts[1]!]
+    await service.snapshot()
+    // The account comes back with no leftover model-x evidence.
+    accountsRef.current = [...accounts]
+    expect(await select(service, { modelId: 'model-x' })).toBe('a')
+  })
+
+  it('clears model evidence on health reset and provider unregister', async () => {
+    const service = new MultiProviderService({ rateLimitCooldownMs: 60_000 })
+    const unregister = service.registerProvider({
+      id: 'example',
+      label: 'Example',
+      accounts: () => accounts,
+      classifyFailure: () => ({ kind: 'rate-limit', retryable: true, cooldownMs: 60_000, scope: 'account-model' as const }),
+    })
+    const state = (service as unknown as { modelRuntime: Map<string, unknown> }).modelRuntime
+    for (const modelId of ['model-x', 'model-y']) {
+      const lease = await service.acquire({ providerId: 'example', modelId, excludeAccountIds: ['b'] })
+      lease.release({ status: 'failure', error: { message: modelId, outputStarted: false } })
+    }
+    expect(state.size).toBe(2)
+
+    service.resetHealth('example', 'a')
+    expect(state.size).toBe(0)
+
+    const lease = await service.acquire({ providerId: 'example', modelId: 'model-x', excludeAccountIds: ['b'] })
+    lease.release({ status: 'failure', error: { message: 'model-x', outputStarted: false } })
+    expect(state.size).toBe(1)
+    unregister()
+    expect(state.size).toBe(0)
+  })
+
+  it('keeps disabled accounts ineligible despite healthy model evidence', async () => {
+    const service = modelHealthScheduler()
+    await service.updatePool('example', {
+      accounts: [
+        { accountId: 'a', enabled: false, weight: 1, priority: 0 },
+        { accountId: 'b', enabled: true, weight: 1, priority: 0 },
+      ],
+    })
+    expect(await select(service, { modelId: 'model-y' })).toBe('b')
+  })
+
+  it('reports active model-scoped cooldowns in the snapshot', async () => {
+    let now = 1_000
+    const service = new MultiProviderService({ now: () => now })
+    service.registerProvider({
+      id: 'example',
+      label: 'Example',
+      accounts: () => accounts,
+      classifyFailure: () => ({ kind: 'quota', retryable: true, cooldownMs: 5_000, scope: 'account-model' as const }),
+    })
+    const lease = await service.acquire({ providerId: 'example', modelId: 'model-x', excludeAccountIds: ['b'] })
+    lease.release({ status: 'failure', error: { message: 'model', outputStarted: false } })
+    const [first, second] = (await service.snapshot()).providers[0]!.accounts
+    // The account stays ready for other models; the model cooldown is listed.
+    expect(first).toMatchObject({ id: 'a', status: 'ready', modelCooldowns: { 'model-x': 6_000 } })
+    expect(second).not.toHaveProperty('modelCooldowns')
+    now = 6_000
+    expect((await service.snapshot()).providers[0]!.accounts[0]).not.toHaveProperty('modelCooldowns')
+  })
+
+  it('does not store credentials in model health state', async () => {
+    const service = modelHealthScheduler()
+    const lease = await service.acquire({ providerId: 'example', modelId: 'model-x', excludeAccountIds: ['b'] })
+    lease.release({ status: 'failure', error: { message: 'model', outputStarted: false } })
+    const state = (service as unknown as { modelRuntime: Map<string, unknown> }).modelRuntime
+    expect(JSON.stringify(state)).not.toContain('secret-work')
+    expect(JSON.stringify(state)).not.toContain('secret-personal')
+    expect([...state.keys()]).toContain(JSON.stringify(['example', 'model-x', 'a']))
   })
 })

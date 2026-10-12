@@ -109,6 +109,7 @@ function setup(
   options: {
     service?: MultiProviderService
     onFailover?: (info: FailoverInfo) => boolean | void
+    affinityKey?: string
   } = {},
 ) {
   // Default scheduler tolerance absorbs three errors per account; the
@@ -132,6 +133,7 @@ function setup(
       source: account.label,
     }),
     ...(options.onFailover === undefined ? {} : { onFailover: options.onFailover }),
+    ...(options.affinityKey === undefined ? {} : { affinityKey: () => options.affinityKey }),
   })
   const models = createModels()
   models.setProvider(lifted)
@@ -292,6 +294,61 @@ describe('liftProvider', () => {
       failure: expect.objectContaining({ message: 'HTTP 500 upstream', outputStarted: false }),
       errorsOnAccount: 3,
     })])
+  })
+
+  it('hands session affinity to the next account when a failover is surfaced', async () => {
+    let now = 1_000
+    const attempts: string[] = []
+    const handler: Handler = (_requestModel, _context, options) => {
+      attempts.push(options?.apiKey ?? '')
+      const stream = createAssistantMessageEventStream()
+      void (async () => {
+        stream.push({ type: 'start', partial: message('pending') })
+        if (options?.apiKey === 'account-a') {
+          finishWithError(stream, 'HTTP 503 upstream')
+          return
+        }
+        finishWithText(stream, 'rotated')
+      })()
+      return stream
+    }
+
+    const service = new MultiProviderService({ now: () => now })
+    const { models, selected } = setup(handler, {
+      service,
+      affinityKey: 'session-1',
+      onFailover: () => true,
+    })
+    const first = await models.completeSimple(selected, { messages: [] })
+    expect(first.stopReason).toBe('error')
+    expect(service.getAffinity(model.provider, 'session-1')).toEqual({ accountId: 'b', explicit: false })
+
+    // The host retries after its own backoff, by which time account a's 1s
+    // transient cooldown has expired; the retry still lands on account b.
+    now += 60_000
+    const retry = await models.completeSimple(selected, { messages: [] })
+    expect(retry.stopReason).toBe('stop')
+    expect(attempts).toEqual(['account-a', 'account-a', 'account-a', 'account-b'])
+  })
+
+  it('keeps an explicit session pin when a failover is surfaced', async () => {
+    const handler: Handler = () => {
+      const stream = createAssistantMessageEventStream()
+      void (async () => {
+        stream.push({ type: 'start', partial: message('pending') })
+        finishWithError(stream, 'HTTP 503 upstream')
+      })()
+      return stream
+    }
+    const service = new MultiProviderService({ errorsBeforeSwitch: 1 })
+    const { models, selected } = setup(handler, {
+      service,
+      affinityKey: 'session-1',
+      onFailover: () => true,
+    })
+    await service.pinAccount(model.provider, 'session-1', 'a')
+    await models.completeSimple(selected, { messages: [] })
+    expect(service.getAffinity(model.provider, 'session-1')).toEqual({ accountId: 'a', explicit: true })
   })
 
   it('keeps rotating accounts inline when onFailover declines', async () => {
