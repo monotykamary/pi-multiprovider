@@ -1,5 +1,6 @@
+import { spawnSync } from 'node:child_process'
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   createProvider,
@@ -238,6 +239,14 @@ describe('MultiAuthStore', () => {
     await expect(store.replaceAccountCredential('example', account.id, {
       type: 'unsupported',
     } as unknown as Credential)).rejects.toThrow('unsupported stored credential type')
+  })
+
+  it('takes over the lock of a process that exited without releasing it', async () => {
+    const { store } = await storeFixture()
+    const exited = spawnSync(process.execPath, ['-e', ''])
+    await writeFile(`${store.path}.lock`, `${hostname()} ${exited.pid}`)
+    await expect(store.updateSchedulerSettings({ rateLimitCooldownMs: 1_000 }))
+      .resolves.toEqual({ rateLimitCooldownMs: 1_000 })
   })
 })
 
