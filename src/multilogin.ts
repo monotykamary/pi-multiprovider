@@ -58,6 +58,52 @@ export function probeSessionRuntime(ctx: ExtensionContext): SessionRuntime | und
   return candidate as unknown as SessionRuntime
 }
 
+/**
+ * Source `mergeProviderAuth` reports when a pool's own accounts satisfy Pi's
+ * auth check. Pi 1.1.0 then surfaces that through getProviderAuthStatus as
+ * `{ source: "environment", label: "multiprovider account pool" }`.
+ */
+export const MULTIPOOL_AUTH_SOURCE = 'multiprovider account pool'
+
+export interface UpstreamAuthStatus {
+  configured?: boolean
+  source?: string
+  label?: string
+}
+
+/**
+ * The credential source Pi actually attributes.
+ *
+ * `getProviderAuthStatus` reports an auth-check hit as
+ * `{ source: "environment", label: <check source> }`. The label is the
+ * check's own source (the pool answering itself, an env var name, or
+ * "configured API key"), so it wins over the generic "environment" wrapper.
+ */
+export function upstreamAuthSource(status?: UpstreamAuthStatus): string | undefined {
+  if (status === undefined) return undefined
+  if (status.source === 'environment' && status.label !== undefined && status.label !== '') return status.label
+  return status.source
+}
+
+/**
+ * True when Pi has a live core credential.
+ *
+ * A pool with no `/login` credential still looks configured, because the
+ * pool's managed auth check satisfies Pi. That self-report, and an
+ * extension-embedded placeholder key (`source: "fallback"`, for example
+ * pi-cursor-sdk), are not a core credential. An extension key that comes
+ * from an env reference reports "configured API key" once the provider is
+ * pooled; that is a real credential and stays live.
+ *
+ * Undefined status is not live. Callers that cannot see the runtime must
+ * not treat that as a missing credential.
+ */
+export function liveUpstreamConfigured(status?: UpstreamAuthStatus): boolean {
+  if (status?.configured !== true) return false
+  const source = upstreamAuthSource(status)
+  return source !== undefined && source !== 'fallback' && source !== MULTIPOOL_AUTH_SOURCE
+}
+
 function loginOptions(
   providers: readonly Provider<Api>[],
   statusFor: (providerId: string) => { type: AuthType; source?: string } | undefined,

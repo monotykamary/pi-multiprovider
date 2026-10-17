@@ -49,7 +49,7 @@ import {
   type InheritedSessionPin,
   virtualSchedulerId,
 } from '../src/index.ts'
-import { promptApiKeyCredential, probeSessionRuntime, selectLogin, showLoginDialog } from '../src/multilogin.ts'
+import { liveUpstreamConfigured, promptApiKeyCredential, probeSessionRuntime, selectLogin, showLoginDialog } from '../src/multilogin.ts'
 import {
   openPoolManager,
   type PoolManagerAuthMethod,
@@ -484,7 +484,10 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot']>>): string[] {
+function statusLines(
+  snapshot: Awaited<ReturnType<MultiProviderService['snapshot']>>,
+  coreCredentialMissing: (providerId: string) => boolean = () => false,
+): string[] {
   const lines: string[] = []
   for (const provider of snapshot.providers) {
     lines.push(
@@ -492,6 +495,12 @@ function statusLines(snapshot: Awaited<ReturnType<MultiProviderService['snapshot
       + `${provider.firstAccountBias ? ' · main-first' : ''}`
       + ` · affinity ${provider.affinity ? 'on' : 'off'}`,
     )
+    // /logout removes only the core /login credential. A pool-only setup is
+    // supported, so this line states that fact instead of treating the pool
+    // as stale. It also covers a pool that outlived /logout.
+    if (coreCredentialMissing(provider.id)) {
+      lines.push('  no live core /login credential (pool is separate from /logout; /multilogout removes pooled accounts)')
+    }
     if (provider.accounts.length === 0) {
       lines.push('  no accounts')
       continue
@@ -1340,7 +1349,15 @@ export default async function multiprovider(pi: ExtensionAPI): Promise<void> {
         ctx.ui.notify('No account pools are configured. Use /multilogin to add one.', 'info')
         return
       }
-      await ctx.ui.select('Provider Accounts', statusLines(snapshot))
+      const runtime = probeSessionRuntime(ctx)
+      await ctx.ui.select('Provider Accounts', statusLines(snapshot, providerId => {
+        if (runtime === undefined) return false
+        try {
+          return !liveUpstreamConfigured(runtime.getProviderAuthStatus(providerId))
+        } catch {
+          return false
+        }
+      }))
     },
   })
 
