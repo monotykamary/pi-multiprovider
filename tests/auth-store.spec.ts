@@ -1,5 +1,6 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   createProvider,
@@ -238,6 +239,23 @@ describe('MultiAuthStore', () => {
     await expect(store.replaceAccountCredential('example', account.id, {
       type: 'unsupported',
     } as unknown as Credential)).rejects.toThrow('unsupported stored credential type')
+  })
+
+  it('preserves concurrent mutations across store instances', async () => {
+    const { store } = await storeFixture()
+    await Promise.all(Array.from({ length: 20 }, (_, index) => new MultiAuthStore(store.path).addAccount('example', {
+      label: `Account ${index}`, credential: { type: 'api_key', key: `key-${index}` },
+    })))
+    expect((await store.getPool('example'))?.accounts).toHaveLength(20)
+  })
+
+  it('takes over the lock of a process that exited without releasing it', async () => {
+    const { store } = await storeFixture()
+    const exited = spawnSync(process.execPath, ['-e', ''])
+    await mkdir(`${store.path}.lock`)
+    await writeFile(join(`${store.path}.lock`, 'owner-dead.json'), JSON.stringify({ host: hostname(), pid: exited.pid }))
+    await expect(store.updateSchedulerSettings({ rateLimitCooldownMs: 1_000 }))
+      .resolves.toEqual({ rateLimitCooldownMs: 1_000 })
   })
 })
 

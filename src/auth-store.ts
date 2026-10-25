@@ -1,4 +1,4 @@
-import { access, chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -12,6 +12,7 @@ import type {
 } from '@earendil-works/pi-ai'
 import { getAgentDir } from '@earendil-works/pi-coding-agent'
 import { SCHEDULER_SETTING_KEYS } from './types.ts'
+import { withFileLock } from './file-lock.ts'
 import type {
   AuthKind,
   SchedulerSettings,
@@ -94,8 +95,6 @@ interface PersistedState {
 }
 
 const DEFAULT_POLICY: SelectionPolicy = 'round-robin'
-const LOCK_STALE_MS = 120_000
-const LOCK_TIMEOUT_MS = 15_000
 const OAUTH_REFRESH_SKEW_MS = 5 * 60_000
 const unsafeKeys = new Set(['__proto__', 'prototype', 'constructor'])
 
@@ -368,23 +367,6 @@ const authContext: AuthContext = {
 
 function abortError(): Error {
   return new Error('multiprovider: operation cancelled')
-}
-
-async function pause(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) throw abortError()
-  let abort: (() => void) | undefined
-  try {
-    await new Promise<void>((resolvePause, reject) => {
-      const timer = setTimeout(resolvePause, ms)
-      abort = () => {
-        clearTimeout(timer)
-        reject(abortError())
-      }
-      signal?.addEventListener('abort', abort, { once: true })
-    })
-  } finally {
-    if (abort !== undefined) signal?.removeEventListener('abort', abort)
-  }
 }
 
 export function getMultiAuthPath(): string {
@@ -688,37 +670,6 @@ export class MultiAuthStore {
   }
 
   private async withLock<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 })
-    const startedAt = Date.now()
-    let handle: Awaited<ReturnType<typeof open>> | undefined
-    while (handle === undefined) {
-      if (signal?.aborted) throw abortError()
-      try {
-        handle = await open(this.lockPath, 'wx', 0o600)
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-        try {
-          const lock = await stat(this.lockPath)
-          if (Date.now() - lock.mtimeMs > LOCK_STALE_MS) {
-            await unlink(this.lockPath)
-            continue
-          }
-        } catch (lockError) {
-          if ((lockError as NodeJS.ErrnoException).code === 'ENOENT') continue
-          throw lockError
-        }
-        if (Date.now() - startedAt > LOCK_TIMEOUT_MS) {
-          throw new Error(`multiprovider: timed out waiting for auth store lock at ${this.lockPath}`)
-        }
-        await pause(25, signal)
-      }
-    }
-
-    try {
-      return await operation()
-    } finally {
-      await handle.close().catch(() => undefined)
-      await unlink(this.lockPath).catch(() => undefined)
-    }
+    return withFileLock(this.lockPath, operation, signal === undefined ? {} : { signal })
   }
 }
