@@ -80,6 +80,10 @@ pi -e /absolute/path/to/provider-extension \
 
 </details>
 
+### Upgrading to 0.12
+
+Stop all Pi processes that share an auth store before upgrading them together. Version 0.12 uses a lock directory instead of a regular `.lock` file. If an older process left `multiprovider-auth.json.lock` behind, remove that **file only after confirming every Pi process has stopped**; never remove a live lock. See [SECURITY.md](SECURITY.md#credential-storage) for details.
+
 ## Quick start
 
 Start Pi after installing both extensions, then run:
