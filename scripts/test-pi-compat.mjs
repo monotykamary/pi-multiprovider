@@ -22,7 +22,9 @@ try {
   const settingsManager = SettingsManager.inMemory({ packages: [root], compaction: { enabled: false }, retry: { enabled: false } });
   const resourceLoader = new DefaultResourceLoader({ cwd: home, agentDir: home, settingsManager,
     noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+  const loadStarted = performance.now();
   await resourceLoader.reload();
+  const loadMs = performance.now() - loadStarted;
   const loaded = resourceLoader.getExtensions();
   assert.deepEqual(loaded.errors, []);
   assert.deepEqual(loaded.warnings ?? [], []);
@@ -31,7 +33,10 @@ try {
   ({ session } = await createAgentSession({ cwd: home, agentDir: home, resourceLoader, modelRuntime, settingsManager, sessionManager: SessionManager.inMemory(home) }));
   const errors = [];
   session.extensionRunner.onError(error => errors.push(error));
+  const bindStarted = performance.now();
   await session.bindExtensions({});
+  const bindMs = performance.now() - bindStarted;
+  console.log(JSON.stringify({ loadMs, bindMs }));
   await session.extensionRunner.emit({ type: 'session_shutdown', reason: 'quit' });
   assert.deepEqual(errors, [], 'real session startup and shutdown must succeed');
   // The extension recognizes its own lift through Pi's provider composition by

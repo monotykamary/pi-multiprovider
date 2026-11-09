@@ -430,14 +430,14 @@ export function healVirtualTemplates(
 export function createVirtualProvider(dependencies: VirtualProviderDependencies): Provider<Api> {
   const { config } = dependencies
 
-  const virtualModel = (model: VirtualModelConfig): Model<Api> => {
+  const virtualModel = (
+    model: VirtualModelConfig,
+    resolveModel: (providerId: string, modelId: string) => Model<Api> | undefined,
+  ): Model<Api> => {
     let template: Model<Api> | undefined
     for (const backend of model.backends) {
       if (backend.enabled === false) continue
-      const candidate = dependencies
-        .getBackingProvider(backend.providerId)
-        ?.getModels()
-        .find(item => item.id === backend.modelId)
+      const candidate = resolveModel(backend.providerId, backend.modelId)
       if (candidate !== undefined) {
         template = candidate
         break
@@ -485,7 +485,24 @@ export function createVirtualProvider(dependencies: VirtualProviderDependencies)
         },
       },
     },
-    getModels: () => config.models.map(virtualModel),
+    getModels() {
+      // Scope the index to this synchronous catalog read, not to the provider
+      // lifetime: refreshes and late registrations must be visible next time.
+      const catalogs = new Map<string, Map<string, Model<Api>>>()
+      const resolveModel = (providerId: string, modelId: string): Model<Api> | undefined => {
+        let catalog = catalogs.get(providerId)
+        if (catalog === undefined) {
+          catalog = new Map()
+          for (const model of dependencies.getBackingProvider(providerId)?.getModels() ?? []) {
+            // Match Array.find's first-wins behavior for duplicate model IDs.
+            if (!catalog.has(model.id)) catalog.set(model.id, model)
+          }
+          catalogs.set(providerId, catalog)
+        }
+        return catalog.get(modelId)
+      }
+      return config.models.map(model => virtualModel(model, resolveModel))
+    },
     stream<T extends Api>(
       model: Model<T>,
       context: TranscriptContext,
