@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.2
+
+- Load the login, pool-manager and virtual-provider editor UI when `/multilogin` or `/vprovider` first runs instead of at startup. Restored virtual and pooled models are still registered before readiness.
+- Read each backing catalog once per virtual catalog read and refresh virtual providers once per reconcile.
+
 ## 0.10.2
 
 - Validate Pi 1.0.0 with exact development pins and wildcard host peers.
